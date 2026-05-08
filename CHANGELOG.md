@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.3.3 — 2026-05-08
+
+### Changed
+
+- `repository` metadata now points at `https://github.com/v9ai/deepseek-loop`
+  (the dedicated source repo). v0.3.2 mistakenly kept the umbrella URL.
+
 ## 0.3.2 — 2026-05-08
 
 ### Changed

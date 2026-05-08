@@ -1,10 +1,10 @@
 [package]
 name = "deepseek-loop"
-version = "0.3.2"
+version = "0.3.3"
 edition = "2021"
 license = "MIT"
 description = "Claude-Code-shaped agent loop over the DeepSeek API: built-in tools, permission modes, cron scheduler with /loop semantics, streaming SdkMessage events"
-repository = "https://github.com/nicolad/ai-apps"
+repository = "https://github.com/v9ai/deepseek-loop"
 readme = "README.md"
 keywords = ["deepseek", "agent", "llm", "tools", "loop"]
 categories = ["api-bindings", "command-line-utilities"]
