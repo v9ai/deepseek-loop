@@ -1,9 +1,9 @@
-use async_trait::async_trait;
-use anyhow::{Context, Result};
-use tracing::{debug, warn};
-use crate::client::{HttpClient, DeepSeekClient, DEFAULT_BASE_URL};
+use crate::client::{DeepSeekClient, HttpClient, DEFAULT_BASE_URL};
 use crate::error::DeepSeekError;
 use crate::types::{ChatRequest, ChatResponse, ReasonerOutput};
+use anyhow::{Context, Result};
+use async_trait::async_trait;
+use tracing::{debug, warn};
 
 /// Native reqwest-based transport.
 #[derive(Clone)]
@@ -13,7 +13,9 @@ pub struct ReqwestClient {
 
 impl ReqwestClient {
     pub fn new() -> Self {
-        Self { client: reqwest::Client::new() }
+        Self {
+            client: reqwest::Client::new(),
+        }
     }
 
     pub fn with_client(client: reqwest::Client) -> Self {
@@ -22,12 +24,19 @@ impl ReqwestClient {
 }
 
 impl Default for ReqwestClient {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 #[async_trait]
 impl HttpClient for ReqwestClient {
-    async fn post_json(&self, url: &str, bearer_token: &str, body: &ChatRequest) -> crate::error::Result<ChatResponse> {
+    async fn post_json(
+        &self,
+        url: &str,
+        bearer_token: &str,
+        body: &ChatRequest,
+    ) -> crate::error::Result<ChatResponse> {
         let resp = self
             .client
             .post(url)
@@ -39,7 +48,10 @@ impl HttpClient for ReqwestClient {
         let status = resp.status();
         if !status.is_success() {
             let text = resp.text().await.unwrap_or_default();
-            return Err(DeepSeekError::Api { status: status.as_u16(), body: text });
+            return Err(DeepSeekError::Api {
+                status: status.as_u16(),
+                body: text,
+            });
         }
 
         let chat_resp: ChatResponse = resp.json().await?;
@@ -54,8 +66,8 @@ const REASONER_MODEL: &str = "deepseek-reasoner";
 pub fn client_from_env() -> Result<DeepSeekClient<ReqwestClient>> {
     let api_key = std::env::var("DEEPSEEK_API_KEY")
         .context("DEEPSEEK_API_KEY environment variable not set")?;
-    let base_url = std::env::var("DEEPSEEK_BASE_URL")
-        .unwrap_or_else(|_| DEFAULT_BASE_URL.to_string());
+    let base_url =
+        std::env::var("DEEPSEEK_BASE_URL").unwrap_or_else(|_| DEFAULT_BASE_URL.to_string());
     Ok(DeepSeekClient::new(ReqwestClient::new(), api_key).with_base_url(base_url))
 }
 
@@ -151,7 +163,9 @@ mod tests {
         let original = std::env::var("DEEPSEEK_API_KEY").ok();
         std::env::remove_var("DEEPSEEK_API_KEY");
         let result = client_from_env();
-        let err = result.err().expect("should error when DEEPSEEK_API_KEY is unset");
+        let err = result
+            .err()
+            .expect("should error when DEEPSEEK_API_KEY is unset");
         assert!(
             err.to_string().contains("DEEPSEEK_API_KEY"),
             "error should mention the missing env var"

@@ -19,17 +19,18 @@ use std::time::Duration;
 
 use chrono::Utc;
 use clap::{Parser, ValueEnum};
-use deepseek::agent::builtin_tools::{default_tools_with_scheduler, default_tools};
-use deepseek::agent::scheduler::{
-    maintenance, CronExpr, Schedule, Scheduler, DEFAULT_MAX_TASKS,
-};
+use deepseek::agent::builtin_tools::{default_tools, default_tools_with_scheduler};
+use deepseek::agent::scheduler::{maintenance, CronExpr, Schedule, Scheduler, DEFAULT_MAX_TASKS};
 use deepseek::types::EffortLevel;
 use deepseek::ReqwestClient;
 use deepseek::{PermissionMode, RunOptions};
 use futures::StreamExt;
 
 #[derive(Parser, Debug)]
-#[command(name = "deepseek-loop", about = "DeepSeek agent loop — Claude-Code shape")]
+#[command(
+    name = "deepseek-loop",
+    about = "DeepSeek agent loop — Claude-Code shape"
+)]
 struct Args {
     /// User prompt. If empty, read from stdin (unless --loop is set).
     #[arg(trailing_var_arg = true)]
@@ -215,14 +216,7 @@ async fn main() -> anyhow::Result<()> {
         let prompt = resolve_loop_prompt(&args)?;
         let cap = args.loop_max_iterations;
         return run_fixed_interval_loop(
-            scheduler,
-            cron_expr,
-            prompt,
-            tools_arc,
-            http,
-            api_key,
-            opts,
-            cap,
+            scheduler, cron_expr, prompt, tools_arc, http, api_key, opts, cap,
         )
         .await;
     }
@@ -318,9 +312,14 @@ fn interval_to_cron(input: &str) -> anyhow::Result<CronExpr> {
             if n > 60 {
                 anyhow::bail!("--loop-every: minute intervals must be ≤ 60");
             }
-            // Round to a clean cron step where possible.
-            let step = pick_cron_step(n, 60);
-            format!("*/{step} * * * *")
+            if n == 60 {
+                // 60m == 1h; `*/60` is rejected by cron (minutes cap at 59).
+                "0 */1 * * *".to_string()
+            } else {
+                // Round to a clean cron step where possible.
+                let step = pick_cron_step(n, 60);
+                format!("*/{step} * * * *")
+            }
         }
         "h" => {
             if n > 24 {
@@ -373,7 +372,11 @@ async fn run_fixed_interval_loop(
     eprintln!(
         "/loop registered task_id={} cron='{cron}' prompt={prompt:?}",
         task_id.as_str(),
-        cron = scheduler.lock().unwrap().list().iter()
+        cron = scheduler
+            .lock()
+            .unwrap()
+            .list()
+            .iter()
             .find(|t| t.id == task_id)
             .and_then(|t| match &t.schedule {
                 deepseek::agent::scheduler::Schedule::Cron(c) => Some(c.as_str().to_string()),
@@ -470,4 +473,144 @@ fn uuid_short() -> String {
         .map(|d| d.as_nanos())
         .unwrap_or(0);
     format!("{nanos:x}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ---- pick_cron_step ----
+
+    #[test]
+    fn pick_cron_step_exact_divisor_returned_unchanged() {
+        // 5 already divides 60 → no rounding.
+        assert_eq!(pick_cron_step(5, 60), 5);
+    }
+
+    #[test]
+    fn pick_cron_step_rounds_to_nearest_divisor() {
+        // 7 isn't a divisor of 60; the closest divisors are 6 and 10. The
+        // implementation walks 1..=base and keeps the *first* minimum, so
+        // it returns 6.
+        assert_eq!(pick_cron_step(7, 60), 6);
+    }
+
+    #[test]
+    fn pick_cron_step_handles_one() {
+        assert_eq!(pick_cron_step(1, 60), 1);
+        assert_eq!(pick_cron_step(1, 24), 1);
+    }
+
+    #[test]
+    fn pick_cron_step_handles_value_equal_to_base() {
+        assert_eq!(pick_cron_step(60, 60), 60);
+        assert_eq!(pick_cron_step(24, 24), 24);
+    }
+
+    // ---- interval_to_cron ----
+
+    #[test]
+    fn interval_to_cron_5m() {
+        let c = interval_to_cron("5m").unwrap();
+        assert_eq!(c.as_str(), "*/5 * * * *");
+    }
+
+    #[test]
+    fn interval_to_cron_30m() {
+        let c = interval_to_cron("30m").unwrap();
+        assert_eq!(c.as_str(), "*/30 * * * *");
+    }
+
+    #[test]
+    fn interval_to_cron_60m_maps_to_hourly() {
+        // 60m == 1h; `*/60` is invalid cron (minutes cap at 59), so the
+        // function maps it to the hourly expression instead.
+        let c = interval_to_cron("60m").unwrap();
+        assert_eq!(c.as_str(), "0 */1 * * *");
+    }
+
+    #[test]
+    fn interval_to_cron_7m_rounds_to_nearest_clean_step() {
+        // 7m has no clean cron step; pick_cron_step rounds to the closest
+        // divisor of 60. That's 6 (6 vs 10, 6 is the first minimum).
+        let c = interval_to_cron("7m").unwrap();
+        assert_eq!(c.as_str(), "*/6 * * * *");
+    }
+
+    #[test]
+    fn interval_to_cron_1h() {
+        let c = interval_to_cron("1h").unwrap();
+        assert_eq!(c.as_str(), "0 */1 * * *");
+    }
+
+    #[test]
+    fn interval_to_cron_12h() {
+        let c = interval_to_cron("12h").unwrap();
+        assert_eq!(c.as_str(), "0 */12 * * *");
+    }
+
+    #[test]
+    fn interval_to_cron_1d() {
+        let c = interval_to_cron("1d").unwrap();
+        assert_eq!(c.as_str(), "0 0 */1 * *");
+    }
+
+    #[test]
+    fn interval_to_cron_30s_rounds_up_to_one_minute() {
+        // Cron has 1-minute granularity, so any sub-minute interval rounds up
+        // to `*/1 * * * *`.
+        let c = interval_to_cron("30s").unwrap();
+        assert_eq!(c.as_str(), "*/1 * * * *");
+    }
+
+    #[test]
+    fn interval_to_cron_with_whitespace() {
+        // Leading/trailing whitespace is trimmed.
+        let c = interval_to_cron("  5m  ").unwrap();
+        assert_eq!(c.as_str(), "*/5 * * * *");
+    }
+
+    #[test]
+    fn interval_to_cron_rejects_empty() {
+        let err = interval_to_cron("").unwrap_err().to_string();
+        assert!(err.contains("empty"), "got: {err}");
+    }
+
+    #[test]
+    fn interval_to_cron_rejects_zero() {
+        let err = interval_to_cron("0m").unwrap_err().to_string();
+        assert!(err.contains("> 0"), "got: {err}");
+    }
+
+    #[test]
+    fn interval_to_cron_rejects_too_many_minutes() {
+        let err = interval_to_cron("61m").unwrap_err().to_string();
+        assert!(err.contains("≤ 60"), "got: {err}");
+    }
+
+    #[test]
+    fn interval_to_cron_rejects_too_many_hours() {
+        let err = interval_to_cron("25h").unwrap_err().to_string();
+        assert!(err.contains("≤ 24"), "got: {err}");
+    }
+
+    #[test]
+    fn interval_to_cron_rejects_unknown_unit() {
+        let err = interval_to_cron("5x").unwrap_err().to_string();
+        assert!(err.contains("unsupported unit"), "got: {err}");
+    }
+
+    #[test]
+    fn interval_to_cron_rejects_non_numeric_prefix() {
+        let err = interval_to_cron("abm").unwrap_err().to_string();
+        assert!(err.contains("invalid number"), "got: {err}");
+    }
+
+    #[test]
+    fn interval_to_cron_rejects_unit_only() {
+        // No leading number — `s` alone parses the empty-prefix as a number,
+        // which fails with `invalid number`.
+        let err = interval_to_cron("m").unwrap_err().to_string();
+        assert!(err.contains("invalid number"), "got: {err}");
+    }
 }

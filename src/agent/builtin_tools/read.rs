@@ -3,7 +3,6 @@ use serde_json::{json, Value};
 
 use crate::agent::tool::{Tool, ToolDefinition};
 
-
 pub struct ReadTool;
 
 #[async_trait]
@@ -37,8 +36,14 @@ impl Tool for ReadTool {
             .get("path")
             .and_then(Value::as_str)
             .ok_or_else(|| "Read: missing string `path`".to_string())?;
-        let offset = args.get("offset").and_then(Value::as_u64).map(|n| n as usize);
-        let limit = args.get("limit").and_then(Value::as_u64).map(|n| n as usize);
+        let offset = args
+            .get("offset")
+            .and_then(Value::as_u64)
+            .map(|n| n as usize);
+        let limit = args
+            .get("limit")
+            .and_then(Value::as_u64)
+            .map(|n| n as usize);
 
         let body = tokio::fs::read_to_string(path)
             .await

@@ -227,6 +227,8 @@ Each task has an 8-character base32 ID. A session can hold up to **50** schedule
 
 Day-of-week uses `0` or `7` for Sunday through `6` for Saturday. Extended syntax (`L`, `W`, `?`, `MON`, `JAN`) is **not** supported. When both day-of-month and day-of-week are constrained, a date matches if either field matches (vixie-cron semantics).
 
+> **Timezone note (since v0.3.4):** cron expressions are evaluated in the host's local timezone. `0 9 * * *` means 9 AM local, not 9 AM UTC. Fire times are stored as UTC so persisted task state is portable.
+
 #### Jitter & expiry
 
 The scheduler adds a deterministic offset to fire times so independent sessions don't hit downstream APIs at the same wall-clock moment:

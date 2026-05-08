@@ -609,7 +609,9 @@ mod tests {
             _ => panic!(),
         }
         match &msgs[4] {
-            SdkMessage::Result { subtype, num_turns, .. } => {
+            SdkMessage::Result {
+                subtype, num_turns, ..
+            } => {
                 assert_eq!(*subtype, ResultSubtype::Success);
                 assert_eq!(*num_turns, 1);
             }
@@ -668,7 +670,9 @@ mod tests {
             })
             .expect("expected a User tool_result message");
         match &denied[0] {
-            ContentBlock::ToolResult { is_error, content, .. } => {
+            ContentBlock::ToolResult {
+                is_error, content, ..
+            } => {
                 assert!(*is_error);
                 assert!(content.contains("Plan mode"), "msg={content}");
             }
@@ -709,4 +713,3 @@ mod tests {
         assert_eq!(names, vec!["echo_ro".to_string()]);
     }
 }
-

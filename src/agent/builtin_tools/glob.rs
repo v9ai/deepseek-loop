@@ -5,7 +5,6 @@ use crate::agent::tool::{Tool, ToolDefinition};
 
 const MAX_RESULTS: usize = 1000;
 
-
 pub struct GlobTool;
 
 #[async_trait]

@@ -109,10 +109,7 @@ pub struct DeepSeekAgent<H: HttpClient> {
 
 impl<H: HttpClient + Clone + Send + Sync + 'static> DeepSeekAgent<H> {
     /// Stream the loop's [`SdkMessage`] sequence.
-    pub fn run(
-        &self,
-        user_prompt: String,
-    ) -> impl futures::Stream<Item = SdkMessage> + use<H> {
+    pub fn run(&self, user_prompt: String) -> impl futures::Stream<Item = SdkMessage> + use<H> {
         run(
             self.http.clone(),
             self.api_key.clone(),

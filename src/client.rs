@@ -1,6 +1,6 @@
-use async_trait::async_trait;
 use crate::error::Result;
 use crate::types::*;
+use async_trait::async_trait;
 
 pub const DEFAULT_BASE_URL: &str = "https://api.deepseek.com/v1";
 
@@ -10,7 +10,12 @@ pub const DEFAULT_BASE_URL: &str = "https://api.deepseek.com/v1";
 #[cfg_attr(not(feature = "wasm"), async_trait)]
 #[cfg_attr(feature = "wasm", async_trait(?Send))]
 pub trait HttpClient {
-    async fn post_json(&self, url: &str, bearer_token: &str, body: &ChatRequest) -> Result<ChatResponse>;
+    async fn post_json(
+        &self,
+        url: &str,
+        bearer_token: &str,
+        body: &ChatRequest,
+    ) -> Result<ChatResponse>;
 }
 
 /// Generic DeepSeek client over any transport.
@@ -49,7 +54,6 @@ impl<H: HttpClient> DeepSeekClient<H> {
         let url = format!("{}/chat/completions", self.base_url);
         self.http.post_json(&url, &self.api_key, request).await
     }
-
 }
 
 /// Build a ChatRequest with optional tool schemas.
@@ -69,7 +73,11 @@ pub fn build_request(
         model: model.as_str().to_string(),
         messages,
         tools,
-        tool_choice: if has_tools { Some(serde_json::json!("auto")) } else { None },
+        tool_choice: if has_tools {
+            Some(serde_json::json!("auto"))
+        } else {
+            None
+        },
         temperature: Some(effort.temperature()),
         max_tokens: Some(effort.max_tokens()),
         stream: Some(false),

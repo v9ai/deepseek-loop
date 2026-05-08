@@ -40,10 +40,13 @@ impl Cache {
         if self.entries.len() >= self.max_entries {
             self.evict_expired();
         }
-        self.entries.insert(key, CacheEntry {
-            value,
-            expires_at: Instant::now() + self.ttl,
-        });
+        self.entries.insert(
+            key,
+            CacheEntry {
+                value,
+                expires_at: Instant::now() + self.ttl,
+            },
+        );
     }
 
     pub fn len(&self) -> usize {
@@ -68,7 +71,9 @@ pub struct InFlightDedup<T: Clone + Send + 'static> {
 
 impl<T: Clone + Send + 'static> InFlightDedup<T> {
     pub fn new() -> Self {
-        Self { map: Arc::new(DashMap::with_shard_amount(32)) }
+        Self {
+            map: Arc::new(DashMap::with_shard_amount(32)),
+        }
     }
 
     /// Returns `Some(receiver)` if another call is already in flight for this key.
@@ -99,5 +104,7 @@ impl<T: Clone + Send + 'static> InFlightDedup<T> {
 }
 
 impl<T: Clone + Send + 'static> Default for InFlightDedup<T> {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }

@@ -5,7 +5,6 @@ use crate::agent::tool::{Tool, ToolDefinition};
 
 const MAX_MATCHES: usize = 200;
 
-
 pub struct GrepTool;
 
 #[async_trait]
@@ -85,12 +84,7 @@ impl Tool for GrepTool {
                 };
                 for (lineno, line) in body.lines().enumerate() {
                     if re.is_match(line) {
-                        out.push_str(&format!(
-                            "{}:{}:{}\n",
-                            path.display(),
-                            lineno + 1,
-                            line
-                        ));
+                        out.push_str(&format!("{}:{}:{}\n", path.display(), lineno + 1, line));
                         matches += 1;
                         if matches >= MAX_MATCHES {
                             return Ok(out);

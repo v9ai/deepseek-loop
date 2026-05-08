@@ -3,7 +3,6 @@ use serde_json::{json, Value};
 
 use crate::agent::tool::{Tool, ToolDefinition};
 
-
 pub struct WriteTool;
 
 #[async_trait]
@@ -16,8 +15,7 @@ impl Tool for WriteTool {
         ToolDefinition {
             name: self.name().to_string(),
             description:
-                "Create or overwrite a file. Parent directories are created automatically."
-                    .into(),
+                "Create or overwrite a file. Parent directories are created automatically.".into(),
             parameters: json!({
                 "type": "object",
                 "properties": {

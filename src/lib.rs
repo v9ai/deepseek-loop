@@ -1,6 +1,6 @@
+pub mod client;
 pub mod error;
 pub mod types;
-pub mod client;
 
 #[cfg(feature = "reqwest-client")]
 pub mod reqwest_client;
@@ -15,20 +15,20 @@ pub mod agent;
 pub mod cache;
 
 // Re-export key types
+pub use client::{build_request, DeepSeekClient, HttpClient, DEFAULT_BASE_URL};
 pub use error::{DeepSeekError, Result};
 pub use types::*;
-pub use client::{HttpClient, DeepSeekClient, DEFAULT_BASE_URL, build_request};
 
 #[cfg(feature = "reqwest-client")]
-pub use reqwest_client::{ReqwestClient, client_from_env, reason, reason_with_retry};
+pub use reqwest_client::{client_from_env, reason, reason_with_retry, ReqwestClient};
 
 #[cfg(feature = "wasm")]
 pub use wasm::WasmClient;
 
 #[cfg(feature = "agent")]
 pub use agent::{
-    AgentBuilder, ContentBlock, DeepSeekAgent, PermissionDecision, PermissionMode, PreToolHook,
-    ResultSubtype, RunOptions, SdkMessage, SystemSubtype, Tool, ToolDefinition, run,
+    run, AgentBuilder, ContentBlock, DeepSeekAgent, PermissionDecision, PermissionMode,
+    PreToolHook, ResultSubtype, RunOptions, SdkMessage, SystemSubtype, Tool, ToolDefinition,
 };
 
 #[cfg(feature = "cache")]

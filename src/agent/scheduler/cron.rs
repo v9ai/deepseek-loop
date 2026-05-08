@@ -36,8 +36,7 @@ impl CronExpr {
         // simpler to reject than to whitelist.
         for f in &fields {
             for ch in f.chars() {
-                let ok = ch.is_ascii_digit()
-                    || matches!(ch, '*' | '/' | ',' | '-');
+                let ok = ch.is_ascii_digit() || matches!(ch, '*' | '/' | ',' | '-');
                 if !ok {
                     return Err(format!(
                         "cron: unsupported character '{ch}' in field '{f}' \
@@ -49,8 +48,8 @@ impl CronExpr {
 
         // Prepend `0 ` for seconds — the `cron` crate uses 6-field internally.
         let six = format!("0 {trimmed}");
-        let parsed = cron::Schedule::from_str(&six)
-            .map_err(|e| format!("cron: parse error: {e}"))?;
+        let parsed =
+            cron::Schedule::from_str(&six).map_err(|e| format!("cron: parse error: {e}"))?;
 
         Ok(Self {
             expr: trimmed.to_string(),
@@ -157,5 +156,144 @@ mod tests {
             "next fire should be at 9 AM local; got {nxt_local} (UTC {nxt_utc})"
         );
         assert_eq!(nxt_local.minute(), 0);
+    }
+
+    #[test]
+    fn parses_step_with_range() {
+        // `*/15` is the most common step shape; verify it parses end-to-end.
+        let e = CronExpr::parse("*/15 * * * *").unwrap();
+        assert_eq!(e.as_str(), "*/15 * * * *");
+    }
+
+    #[test]
+    fn parses_explicit_list() {
+        let e = CronExpr::parse("0,15,30,45 * * * *").unwrap();
+        assert_eq!(e.as_str(), "0,15,30,45 * * * *");
+    }
+
+    #[test]
+    fn parses_range_in_dow() {
+        // weekday range — already covered for parse, here we also fire it.
+        let mut e = CronExpr::parse("0 9 * * 1-5").unwrap();
+        let now = Utc::now();
+        let nxt = e.next_after(now).expect("should have a next fire");
+        assert!(nxt > now);
+    }
+
+    #[test]
+    fn parses_with_surrounding_whitespace() {
+        // Trim should make leading/trailing whitespace harmless.
+        let e = CronExpr::parse("   */5 * * * *   ").unwrap();
+        assert_eq!(e.as_str(), "*/5 * * * *");
+    }
+
+    #[test]
+    fn rejects_empty_string() {
+        let err = CronExpr::parse("").unwrap_err();
+        assert!(err.contains("5 fields"), "got: {err}");
+    }
+
+    #[test]
+    fn rejects_too_many_fields() {
+        let err = CronExpr::parse("0 0 9 * * *").unwrap_err();
+        assert!(err.contains("5 fields"), "got: {err}");
+    }
+
+    #[test]
+    fn rejects_w_syntax() {
+        let err = CronExpr::parse("0 9 1W * *").unwrap_err();
+        assert!(err.contains("unsupported character"), "got: {err}");
+    }
+
+    #[test]
+    fn rejects_question_mark() {
+        let err = CronExpr::parse("0 9 ? * *").unwrap_err();
+        assert!(err.contains("unsupported character"), "got: {err}");
+    }
+
+    #[test]
+    fn rejects_month_alias() {
+        let err = CronExpr::parse("0 9 1 JAN *").unwrap_err();
+        assert!(err.contains("unsupported character"), "got: {err}");
+    }
+
+    #[test]
+    fn rejects_garbage_numbers() {
+        // 5-field shape passes the field-count check but fails the underlying
+        // cron parse. The character whitelist would actually allow this through
+        // (digits + `-`), so it must surface a "parse error".
+        let err = CronExpr::parse("99 99 99 99 99").unwrap_err();
+        assert!(err.contains("parse error"), "got: {err}");
+    }
+
+    #[test]
+    fn next_after_is_strictly_monotonic() {
+        // Three consecutive next_after calls must return strictly increasing
+        // times. This guards against an off-by-one where `after` is treated
+        // inclusively.
+        let mut e = CronExpr::parse("*/5 * * * *").unwrap();
+        let t0 = Utc::now();
+        let t1 = e.next_after(t0).unwrap();
+        let t2 = e.next_after(t1).unwrap();
+        let t3 = e.next_after(t2).unwrap();
+        assert!(t1 > t0);
+        assert!(t2 > t1);
+        assert!(t3 > t2);
+        // And the gap between consecutive fires for `*/5` is exactly 5 min.
+        assert_eq!((t2 - t1).num_minutes(), 5);
+        assert_eq!((t3 - t2).num_minutes(), 5);
+    }
+
+    #[test]
+    fn approx_interval_for_every_5_min() {
+        let mut e = CronExpr::parse("*/5 * * * *").unwrap();
+        assert_eq!(e.approx_interval_seconds(), 300);
+    }
+
+    #[test]
+    fn approx_interval_for_hourly() {
+        let mut e = CronExpr::parse("0 * * * *").unwrap();
+        assert_eq!(e.approx_interval_seconds(), 3600);
+    }
+
+    #[test]
+    fn approx_interval_for_daily() {
+        let mut e = CronExpr::parse("0 0 * * *").unwrap();
+        assert_eq!(e.approx_interval_seconds(), 86_400);
+    }
+
+    #[test]
+    fn approx_interval_floored_at_60s() {
+        // `*/1 * * * *` — every minute → 60s. The `.max(60)` floor keeps
+        // sub-minute schedulers (which we don't actually parse) safe.
+        let mut e = CronExpr::parse("*/1 * * * *").unwrap();
+        assert_eq!(e.approx_interval_seconds(), 60);
+    }
+
+    #[test]
+    fn serde_round_trip_preserves_expr() {
+        // CronExpr derives Serialize/Deserialize and skips `parsed`. A round
+        // trip through JSON must preserve the original expression and keep
+        // `next_after` working after deserialization.
+        let original = CronExpr::parse("*/15 * * * *").unwrap();
+        let json = serde_json::to_string(&original).unwrap();
+        let mut decoded: CronExpr = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded.as_str(), "*/15 * * * *");
+        // ensure_parsed should re-hydrate the schedule lazily.
+        let now = Utc::now();
+        let nxt = decoded
+            .next_after(now)
+            .expect("should fire after rehydrate");
+        assert!(nxt > now);
+    }
+
+    #[test]
+    fn clone_does_not_share_parsed_cache() {
+        // CronExpr is Clone; the clone should still work even though `parsed`
+        // is `#[serde(skip)]` and might be `None` after a round-trip.
+        let original = CronExpr::parse("*/5 * * * *").unwrap();
+        let mut cloned = original.clone();
+        let now = Utc::now();
+        assert!(cloned.next_after(now).is_some());
     }
 }

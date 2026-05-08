@@ -7,7 +7,6 @@ use crate::agent::tool::{Tool, ToolDefinition};
 
 const DEFAULT_TIMEOUT_SECS: u64 = 120;
 
-
 pub struct BashTool;
 
 #[async_trait]

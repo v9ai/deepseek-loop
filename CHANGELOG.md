@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.3.4 — 2026-05-08
+## 0.3.4 — 2026-05-09
 
 ### Fixed
 
@@ -9,19 +9,34 @@
   whose `0 9 * * *` jobs fired at 9 AM UTC instead of 9 AM local. Stored fire
   times are still serialized as `DateTime<Utc>` so persisted task state is
   timezone-independent.
+- **`Schedule::Once` serialization bug fixed** — the variant was previously
+  declared as a newtype, which serde's internally-tagged enum representation
+  cannot serialize. Changed to a struct variant (`Once { at: DateTime<Utc> }`).
+  Any persisted `tasks.json` from v0.3.x with `Once` tasks will not deserialize
+  correctly and should be discarded (the scheduler already prunes expired tasks
+  on restore, so in practice only future one-shots are affected).
+- **`--loop-every 60m` now correctly maps to `0 */1 * * *`** instead of the
+  invalid `*/60 * * * *` that cron rejects (cron minute values cap at 59).
 - **`--loop-every` registration now prints the chosen cron expression** so the
   user can see what step the interval mapped to (e.g. a `7m` request rounds
-  to `*/5 * * * *` cleanly and we tell you).
+  to `*/6 * * * *` and you see it in the banner).
+
+### Tests
+
+- Added 81 new tests covering the scheduler, cron grammar, jitter, store
+  persistence, `interval_to_cron`, and `pick_cron_step`. Previous count: 22.
+  Notable additions: `next_after_uses_local_timezone`, serde round-trip for
+  all `Schedule` variants, atomic save, schema-version guard, monotonic
+  `next_after`, approx-interval values, distinct-jitter-offsets, and full
+  `interval_to_cron` input matrix.
 
 ### Documentation
 
-- README expanded with parity-shape sections matching the upstream `/loop`
-  reference: invocation shapes, `loop.md` discovery, cron grammar, manage-tasks,
-  disable flag, limitations, and a callout that times are now interpreted in
-  local timezone.
-- Dynamic-mode banner and CLI help now say explicitly that v0.3.x uses a
-  fixed 60 s floor between iterations (vs. the spec's 60–3600 s adaptive
-  delay, which lands in v0.4).
+- README now explicitly notes that cron expressions are interpreted in the
+  host's local timezone (since v0.3.4).
+- Dynamic-mode banner now says explicitly that v0.3.x uses a fixed 60 s floor
+  between iterations (vs. the spec's 60–3600 s adaptive delay, which lands in
+  v0.4).
 
 ## 0.3.3 — 2026-05-08
 

@@ -73,11 +73,12 @@ impl Tool for CronCreateTool {
         let has_cron = args.get("cron").is_some();
         let has_at = args.get("at").is_some();
         let has_dynamic = args.get("dynamic").and_then(Value::as_bool) == Some(true);
-        let kinds = [has_cron, has_at, has_dynamic].iter().filter(|b| **b).count();
+        let kinds = [has_cron, has_at, has_dynamic]
+            .iter()
+            .filter(|b| **b)
+            .count();
         if kinds == 0 {
-            return Err(
-                "CronCreate: provide one of `cron`, `at`, or `dynamic=true`".into(),
-            );
+            return Err("CronCreate: provide one of `cron`, `at`, or `dynamic=true`".into());
         }
         if kinds > 1 {
             return Err("CronCreate: `cron`, `at`, `dynamic` are mutually exclusive".into());
@@ -92,7 +93,7 @@ impl Tool for CronCreateTool {
             let parsed: DateTime<Utc> = raw
                 .parse::<DateTime<Utc>>()
                 .map_err(|e| format!("CronCreate: invalid `at` timestamp: {e}"))?;
-            (Schedule::Once(parsed), false)
+            (Schedule::Once { at: parsed }, false)
         } else {
             (Schedule::Dynamic, true)
         };
@@ -165,13 +166,9 @@ mod tests {
             serde_json::from_str(&list.call_json(json!({})).await.unwrap()).unwrap();
         assert_eq!(listed["count"].as_u64().unwrap(), 1);
 
-        let deleted: Value = serde_json::from_str(
-            &delete
-                .call_json(json!({"task_id": task_id}))
-                .await
-                .unwrap(),
-        )
-        .unwrap();
+        let deleted: Value =
+            serde_json::from_str(&delete.call_json(json!({"task_id": task_id})).await.unwrap())
+                .unwrap();
         assert_eq!(deleted["deleted"].as_bool().unwrap(), true);
 
         let listed2: Value =
@@ -198,10 +195,7 @@ mod tests {
     async fn requires_one_schedule_kind() {
         let sched = fresh_sched();
         let create = CronCreateTool::new(sched);
-        let err = create
-            .call_json(json!({"prompt": "x"}))
-            .await
-            .unwrap_err();
+        let err = create.call_json(json!({"prompt": "x"})).await.unwrap_err();
         assert!(err.contains("one of"), "got: {err}");
     }
 }

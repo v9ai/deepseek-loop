@@ -53,7 +53,7 @@ impl Tool for CronListTool {
             .map(|t| {
                 let schedule = match &t.schedule {
                     Schedule::Cron(c) => json!({"kind": "cron", "expr": c.as_str()}),
-                    Schedule::Once(at) => json!({"kind": "once", "at": at}),
+                    Schedule::Once { at } => json!({"kind": "once", "at": at}),
                     Schedule::Dynamic => json!({"kind": "dynamic"}),
                 };
                 json!({

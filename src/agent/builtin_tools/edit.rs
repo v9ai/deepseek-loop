@@ -3,7 +3,6 @@ use serde_json::{json, Value};
 
 use crate::agent::tool::{Tool, ToolDefinition};
 
-
 pub struct EditTool;
 
 #[async_trait]

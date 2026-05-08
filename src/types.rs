@@ -68,7 +68,10 @@ impl ChatContent {
 }
 
 impl Serialize for ChatContent {
-    fn serialize<S: serde::Serializer>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error> {
+    fn serialize<S: serde::Serializer>(
+        &self,
+        serializer: S,
+    ) -> std::result::Result<S::Ok, S::Error> {
         match self {
             Self::Text(s) => serializer.serialize_str(s),
             Self::Null => serializer.serialize_none(),
@@ -77,7 +80,9 @@ impl Serialize for ChatContent {
 }
 
 impl<'de> Deserialize<'de> for ChatContent {
-    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> std::result::Result<Self, D::Error> {
+    fn deserialize<D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> std::result::Result<Self, D::Error> {
         let value = serde_json::Value::deserialize(deserializer)?;
         match value {
             serde_json::Value::String(s) => Ok(Self::Text(s)),
