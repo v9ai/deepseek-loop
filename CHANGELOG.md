@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.3.1 — 2026-05-08
+
+### Fixed
+
+- Bin now loads both `.env` and `.env.local`, with `.env.local` overriding —
+  matches Next.js / Vite convention. Previously only `.env` loaded, so a
+  secret living only in `.env.local` was silently invisible to Bash
+  subprocesses the agent spawned, even though the bin's own
+  `DEEPSEEK_API_KEY` (often duplicated in both files) loaded fine. Hit in
+  practice when curling an authenticated downstream service from inside an
+  agent run.
+
 ## 0.3.0 — 2026-05-08
 
 ### Breaking

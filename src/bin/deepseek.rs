@@ -146,7 +146,18 @@ impl From<CliPermissionMode> for PermissionMode {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let _ = dotenvy::dotenv();
+    // Load `.env` first, then `.env.local` (Next.js / Vite convention — local
+    // overrides shared). `dotenvy::from_filename` skips missing files
+    // silently. Without this, a `LANGGRAPH_AUTH_TOKEN` (or any secret) that
+    // lives only in `.env.local` would never reach a Bash subprocess the agent
+    // spawns, even though `.env` got picked up — a confusing partial-load
+    // failure mode we hit in practice.
+    let _ = dotenvy::from_filename(".env");
+    let _ = dotenvy::from_filename(".env.local").or_else(|_| dotenvy::dotenv());
+    // `from_filename` does not override existing vars, so `.env.local` only
+    // adds keys that `.env` didn't already set. To honor the convention that
+    // `.env.local` overrides `.env`, we re-read `.env.local` with `override_*`.
+    let _ = dotenvy::from_filename_override(".env.local");
     let args = Args::parse();
 
     tracing_subscriber::fmt()
