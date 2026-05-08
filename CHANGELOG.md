@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.3.2 — 2026-05-08
+
+### Changed
+
+- Source now lives at https://github.com/v9ai/deepseek-loop and is mirrored
+  into the umbrella monorepo at https://github.com/nicolad/ai-apps as a git
+  submodule. The crates.io `repository` field intentionally still points at
+  the umbrella so issue/discussion traffic centralizes there.
+
 ## 0.3.1 — 2026-05-08
 
 ### Fixed
