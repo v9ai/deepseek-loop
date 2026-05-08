@@ -208,6 +208,10 @@ async fn main() -> anyhow::Result<()> {
     // Fixed-interval loop: --loop-every implies --loop.
     if let Some(interval) = args.loop_every.as_deref() {
         let cron_expr = interval_to_cron(interval)?;
+        eprintln!(
+            "/loop interval='{interval}' resolved to cron='{cron}' (local timezone)",
+            cron = cron_expr.as_str()
+        );
         let prompt = resolve_loop_prompt(&args)?;
         let cap = args.loop_max_iterations;
         return run_fixed_interval_loop(
@@ -366,7 +370,17 @@ async fn run_fixed_interval_loop(
         s.create(Schedule::Cron(Box::new(cron)), prompt.clone(), true)
             .map_err(|e| anyhow::anyhow!("scheduler: {e}"))?
     };
-    eprintln!("/loop registered task_id={} prompt={prompt:?}", task_id.as_str());
+    eprintln!(
+        "/loop registered task_id={} cron='{cron}' prompt={prompt:?}",
+        task_id.as_str(),
+        cron = scheduler.lock().unwrap().list().iter()
+            .find(|t| t.id == task_id)
+            .and_then(|t| match &t.schedule {
+                deepseek::agent::scheduler::Schedule::Cron(c) => Some(c.as_str().to_string()),
+                _ => None,
+            })
+            .unwrap_or_else(|| "?".to_string()),
+    );
 
     let mut iter_count: u32 = 0;
     loop {
@@ -403,7 +417,10 @@ async fn run_dynamic_loop(
     opts: RunOptions,
     max_iterations: Option<u32>,
 ) -> anyhow::Result<()> {
-    eprintln!("/loop dynamic mode — prompt={prompt:?}");
+    eprintln!(
+        "/loop dynamic mode — prompt={prompt:?} (current build: fixed 60s floor between \
+         iterations; the spec's 60-3600s adaptive delay lands in v0.4)"
+    );
     let mut iter_count: u32 = 0;
     loop {
         stream_one_run(

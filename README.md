@@ -143,30 +143,120 @@ cargo run -p deepseek-loop --features cli --bin deepseek-loop -- \
 
 ### Scheduler / `/loop` (feature `scheduler`, on by default)
 
-Matches Claude Code's [`/loop` semantics](https://code.claude.com/docs/en/scheduled-tasks). Four built-in tools (`CronCreate`, `CronList`, `CronDelete`, `Monitor`) plus three CLI invocation shapes:
+Models Claude Code's `/loop` scheduler — see the upstream spec at <https://code.claude.com/docs/en/scheduled-tasks>. The crate ships four built-in tools (`CronCreate`, `CronList`, `CronDelete`, `Monitor`) and three CLI invocation shapes.
+
+#### Three invocation shapes
+
+| What you provide | Example | What happens |
+| --- | --- | --- |
+| Interval + prompt | `deepseek-loop --loop-every 5m --loop-prompt 'check the deploy'` | Fixed cron schedule. Interval is converted to a clean cron step and the resolved expression is printed at registration. |
+| Prompt only | `deepseek-loop --loop --loop-prompt 'check whether CI passed'` | Dynamic interval. Currently a fixed 60 s floor between iterations (the upstream spec's adaptive 60–3600 s delay lands in v0.4). |
+| Bare or interval-only | `deepseek-loop --loop` or `--loop-every 15m` | Runs the [built-in maintenance prompt](#built-in-maintenance-prompt) — or your `loop.md` if one exists. |
 
 ```bash
-# Fixed cron interval (5 minutes between fires)
-deepseek-loop --loop-every 5m --loop-prompt "check the deploy and report" \
+# Fixed cron interval, capped at 10 fires
+deepseek-loop --loop-every 5m --loop-prompt 'check the deploy and report' \
     --loop-max-iterations 10
 
-# Dynamic interval — agent picks delay each iteration (60s floor)
-deepseek-loop --loop --loop-prompt "check whether CI passed and address review comments"
+# Dynamic interval
+deepseek-loop --loop --loop-prompt 'check whether CI passed and address review comments'
 
-# Bare /loop — runs the built-in maintenance prompt (or your loop.md)
+# Bare /loop with the built-in maintenance prompt (or your loop.md)
 deepseek-loop --loop
 
-# Resume a prior session's tasks
+# Resume a prior session's scheduled tasks
 deepseek-loop --resume <session-id> --loop
 ```
 
-`loop.md` discovery: `.claude/loop.md` (project) → `~/.claude/loop.md` (user) → built-in default. Capped at 25 KB.
+> **Times are interpreted in the host's local timezone** as of v0.3.4 (was UTC in 0.3.3 and earlier). A cron expression like `0 9 * * *` fires at 9 AM local. Stored fire times are still serialized as UTC so persisted state is timezone-independent.
 
-Cron grammar: 5-field `minute hour dom month dow` with `*`, `5`, `*/15`, `1-5`, `1,15,30`. Extended syntax (`L`, `W`, `?`, `MON`, `JAN`) is rejected.
+#### `loop.md` discovery
 
-Limits: 50 tasks per session, recurring tasks expire 7 days after creation, deterministic jitter is applied to fire times. Set `CLAUDE_CODE_DISABLE_CRON=1` (or the `DEEPSEEK_LOOP_DISABLE_CRON=1` alias) to disable the scheduler entirely.
+When you run `/loop` (bare or interval-only) and don't supply a prompt, the bin resolves the prompt from these locations in order:
 
-Persistence: tasks are written to `${cache_dir}/deepseek-loop/sessions/<session_id>/tasks.json` after each mutation, restored via `--resume <session_id>`.
+| Path | Scope |
+| --- | --- |
+| `.claude/loop.md` | Project-level. Takes precedence when both files exist. |
+| `~/.claude/loop.md` | User-level. Applies in any project that does not define its own. |
+
+Files larger than 25 KB are truncated. When neither file exists, the bin falls back to the built-in maintenance prompt.
+
+#### Built-in maintenance prompt
+
+A bare `--loop` (no prompt, no `loop.md`) runs a maintenance prompt that, on each iteration, in order:
+
+1. Continues any unfinished work from the conversation.
+2. Tends to the current branch's pull request: review comments, failed CI runs, merge conflicts.
+3. If nothing else is pending, runs a cleanup pass — bug hunts or simplification.
+
+It does not start new initiatives outside that scope, and irreversible actions only proceed when they continue something the transcript already authorized.
+
+#### Manage tasks
+
+Ask the agent in natural language during a run:
+
+```text
+what scheduled tasks do I have?
+cancel the deploy check job
+remind me at 3pm to push the release branch
+in 45 minutes, check whether the integration tests passed
+```
+
+Under the hood, the agent calls these tools:
+
+| Tool | Purpose |
+| --- | --- |
+| `CronCreate` | Schedule a new task. Accepts a 5-field cron expression, an ISO-8601 timestamp for one-shot, or `dynamic=true`; the prompt to run; `recurring` true/false. |
+| `CronList` | List all scheduled tasks with their 8-character IDs, schedules, prompts, next fire time. |
+| `CronDelete` | Cancel a task by `task_id`. |
+
+Each task has an 8-character base32 ID. A session can hold up to **50** scheduled tasks at once.
+
+#### Cron expression reference
+
+5-field standard cron: `minute hour day-of-month month day-of-week`. All fields support wildcards (`*`), single values (`5`), steps (`*/15`), ranges (`1-5`), and comma-separated lists (`1,15,30`).
+
+| Example | Meaning |
+| --- | --- |
+| `*/5 * * * *` | Every 5 minutes |
+| `0 * * * *` | Every hour on the hour |
+| `7 * * * *` | Every hour at 7 minutes past |
+| `0 9 * * *` | Every day at 9 AM local |
+| `0 9 * * 1-5` | Weekdays at 9 AM local |
+| `30 14 15 3 *` | March 15 at 2:30 PM local |
+
+Day-of-week uses `0` or `7` for Sunday through `6` for Saturday. Extended syntax (`L`, `W`, `?`, `MON`, `JAN`) is **not** supported. When both day-of-month and day-of-week are constrained, a date matches if either field matches (vixie-cron semantics).
+
+#### Jitter & expiry
+
+The scheduler adds a deterministic offset to fire times so independent sessions don't hit downstream APIs at the same wall-clock moment:
+
+- Recurring tasks fire up to **30 minutes** after the scheduled time, or up to **half the interval** for sub-hourly tasks. An hourly job at `:00` may fire anywhere up to `:30`.
+- One-shot tasks scheduled at the top or bottom of the hour fire up to **90 seconds early**.
+
+The offset is derived from the task ID, so the same task always gets the same offset. If exact timing matters, pick a minute that isn't `:00` or `:30` (e.g. `3 9 * * *` instead of `0 9 * * *`).
+
+Recurring tasks **expire 7 days** after creation: they fire one final time, then delete themselves. This bounds how long a forgotten loop can run.
+
+#### Persistence
+
+Tasks are written to `${cache_dir}/deepseek-loop/sessions/<session_id>/tasks.json` after each mutation. Restore them with `--resume <session_id>`. Background `Bash` and `Monitor` tasks are **not** restored.
+
+#### Disable
+
+Set either env var to `1` to disable the scheduler entirely. Cron tools and the `--loop` flags become unavailable, and any already-scheduled tasks stop firing:
+
+```bash
+CLAUDE_CODE_DISABLE_CRON=1   # canonical; matches Claude Code
+DEEPSEEK_LOOP_DISABLE_CRON=1 # crate-specific alias
+```
+
+#### Limitations
+
+- Tasks only fire while `deepseek-loop` is running and idle. Closing the terminal or letting the bin exit stops them firing.
+- No catch-up for missed fires — if a task's scheduled time passes while the bin is busy on a long request, it fires once when the bin becomes idle, not once per missed interval.
+- Dynamic mode currently uses a fixed **60 s floor** between iterations. The upstream spec's adaptive 60–3600 s delay lands in v0.4 (requires a host↔agent protocol for the agent to signal a chosen delay).
+- For unattended cron-driven automation that must survive without the bin running, drive `deepseek-loop` from system `cron` / launchd / GitHub Actions instead.
 
 ### Cache (feature `cache`)
 

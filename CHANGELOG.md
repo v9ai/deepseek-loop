@@ -1,5 +1,28 @@
 # Changelog
 
+## 0.3.4 — 2026-05-08
+
+### Fixed
+
+- **Cron expressions now evaluate in the host's local timezone**, matching the
+  Claude Code `/loop` spec. Earlier releases used UTC, which surprised users
+  whose `0 9 * * *` jobs fired at 9 AM UTC instead of 9 AM local. Stored fire
+  times are still serialized as `DateTime<Utc>` so persisted task state is
+  timezone-independent.
+- **`--loop-every` registration now prints the chosen cron expression** so the
+  user can see what step the interval mapped to (e.g. a `7m` request rounds
+  to `*/5 * * * *` cleanly and we tell you).
+
+### Documentation
+
+- README expanded with parity-shape sections matching the upstream `/loop`
+  reference: invocation shapes, `loop.md` discovery, cron grammar, manage-tasks,
+  disable flag, limitations, and a callout that times are now interpreted in
+  local timezone.
+- Dynamic-mode banner and CLI help now say explicitly that v0.3.x uses a
+  fixed 60 s floor between iterations (vs. the spec's 60–3600 s adaptive
+  delay, which lands in v0.4).
+
 ## 0.3.3 — 2026-05-08
 
 ### Changed

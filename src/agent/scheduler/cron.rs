@@ -7,7 +7,7 @@
 
 use std::str::FromStr;
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Local, Utc};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -64,16 +64,23 @@ impl CronExpr {
     }
 
     /// Compute the next fire time strictly after `after`.
+    ///
+    /// Cron expressions are interpreted in the **host's local timezone**
+    /// (matching the Claude Code `/loop` spec). The returned fire time is
+    /// stored as `DateTime<Utc>` so persisted task records stay timezone-
+    /// independent.
     pub fn next_after(&mut self, after: DateTime<Utc>) -> Option<DateTime<Utc>> {
         self.ensure_parsed();
+        let local_after: DateTime<Local> = after.with_timezone(&Local);
         self.parsed
             .as_ref()
-            .and_then(|s| s.after(&after).next())
+            .and_then(|s| s.after(&local_after).next())
+            .map(|t| t.with_timezone(&Utc))
     }
 
     /// Approximate interval between consecutive fires, used for jitter sizing.
     pub fn approx_interval_seconds(&mut self) -> i64 {
-        let now = Utc::now();
+        let now: DateTime<Local> = Local::now();
         self.ensure_parsed();
         let Some(sched) = self.parsed.as_ref() else {
             return 3600;
@@ -132,5 +139,23 @@ mod tests {
         let nxt = e.next_after(now).unwrap();
         assert!(nxt > now);
         assert!((nxt - now).num_minutes() <= 5);
+    }
+
+    #[test]
+    fn next_after_uses_local_timezone() {
+        // `0 9 * * *` should mean 9 AM **local**, not 9 AM UTC. We verify by
+        // converting the returned UTC fire time to local time and confirming
+        // the local hour is 9.
+        use chrono::{Local, Timelike};
+        let mut e = CronExpr::parse("0 9 * * *").unwrap();
+        let now = Utc::now();
+        let nxt_utc = e.next_after(now).expect("should have a next fire");
+        let nxt_local: DateTime<Local> = nxt_utc.with_timezone(&Local);
+        assert_eq!(
+            nxt_local.hour(),
+            9,
+            "next fire should be at 9 AM local; got {nxt_local} (UTC {nxt_utc})"
+        );
+        assert_eq!(nxt_local.minute(), 0);
     }
 }
