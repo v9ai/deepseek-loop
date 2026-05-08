@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.3.5 — 2026-05-09
+
+### Fixed
+
+- **`Schedule::Once` serialization bug** — the variant was a newtype which
+  serde's internally-tagged enum representation cannot serialize. Changed to
+  `Once { at: DateTime<Utc> }`. Persisted `tasks.json` from v0.3.x with `Once`
+  tasks will not round-trip; the scheduler already prunes expired tasks on
+  restore, so only future one-shots are affected in practice.
+- **`--loop-every 60m`** now correctly maps to `0 */1 * * *` instead of the
+  invalid `*/60 * * * *` that the cron library rejects.
+
+### Tests
+
+- Added 81 new tests (total: 103) covering cron grammar, scheduler lifecycle,
+  jitter envelopes, store persistence, `interval_to_cron`, and `pick_cron_step`.
+  Notable additions: serde round-trip for all `Schedule` variants, atomic save,
+  schema-version guard, monotonic `next_after`, full `interval_to_cron` input
+  matrix including all rejection paths.
+
 ## 0.3.4 — 2026-05-09
 
 ### Fixed
