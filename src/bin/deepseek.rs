@@ -1,25 +1,37 @@
-//! `deepseek` — a tiny Claude-Code-shaped CLI for the DeepSeek agent loop.
+//! `deepseek-loop` — a Claude-Code-shaped CLI for the DeepSeek agent loop.
 //!
-//! Run a single agent turn with the six built-in tools and stream the loop's
-//! `SdkMessage` events to stdout. Pretty mode by default; `--json` emits NDJSON
-//! suitable for piping into other tools.
+//! Streams the loop's `SdkMessage` events as NDJSON (one JSON object per line)
+//! to stdout. Pipe into `jq` or any line-oriented consumer.
+//!
+//! With the `scheduler` feature (on by default), the binary exposes the four
+//! cron-style tools — `CronCreate`, `CronList`, `CronDelete`, `Monitor` — and
+//! supports three `/loop` invocation shapes:
+//!
+//! * `--loop-every 5m --loop-prompt 'check the deploy'` — fixed cron interval
+//! * `--loop --loop-prompt 'check whether CI passed'`   — dynamic interval
+//! * `--loop`                                            — built-in maintenance
+//!   prompt (resolved from `.claude/loop.md`, `~/.claude/loop.md`, or the
+//!   built-in default)
 
 use std::io::Read;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
+use chrono::Utc;
 use clap::{Parser, ValueEnum};
-use deepseek::agent::builtin_tools::default_tools;
-use deepseek::{
-    ContentBlock, PermissionMode, ResultSubtype, RunOptions, SdkMessage, SystemSubtype,
+use deepseek::agent::builtin_tools::{default_tools_with_scheduler, default_tools};
+use deepseek::agent::scheduler::{
+    maintenance, CronExpr, Schedule, Scheduler, DEFAULT_MAX_TASKS,
 };
-use deepseek::{ReqwestClient};
 use deepseek::types::EffortLevel;
+use deepseek::ReqwestClient;
+use deepseek::{PermissionMode, RunOptions};
 use futures::StreamExt;
 
 #[derive(Parser, Debug)]
-#[command(name = "deepseek", about = "DeepSeek agent loop — Claude-Code shape")]
+#[command(name = "deepseek-loop", about = "DeepSeek agent loop — Claude-Code shape")]
 struct Args {
-    /// User prompt. If empty, read from stdin.
+    /// User prompt. If empty, read from stdin (unless --loop is set).
     #[arg(trailing_var_arg = true)]
     prompt: Vec<String>,
 
@@ -31,7 +43,7 @@ struct Args {
     #[arg(long)]
     max_turns: Option<u32>,
 
-    /// Cap total spend in USD.
+    /// Cap total spend in USD across all iterations.
     #[arg(long)]
     max_budget_usd: Option<f64>,
 
@@ -59,13 +71,37 @@ struct Args {
     #[arg(long)]
     base_url: Option<String>,
 
-    /// Emit NDJSON (one `SdkMessage` per line) instead of pretty output.
-    #[arg(long)]
-    json: bool,
-
     /// API key. Falls back to `$DEEPSEEK_API_KEY`.
     #[arg(long)]
     api_key: Option<String>,
+
+    /// Run the loop in `/loop` mode. Combine with `--loop-every` for a fixed
+    /// cron interval, with `--loop-prompt` for the prompt body, or alone for
+    /// the built-in maintenance prompt at a dynamic interval.
+    #[arg(long)]
+    r#loop: bool,
+
+    /// Cron-style interval like `5m`, `30s`, `1h`. When set, the loop runs at
+    /// that cadence regardless of `--loop`.
+    #[arg(long)]
+    loop_every: Option<String>,
+
+    /// Prompt body for the loop. Defaults to the trailing positional args, or
+    /// the resolved `loop.md` if both are empty.
+    #[arg(long)]
+    loop_prompt: Option<String>,
+
+    /// Cap the number of loop iterations (defaults to unlimited).
+    #[arg(long)]
+    loop_max_iterations: Option<u32>,
+
+    /// Resume scheduler state from a prior session id.
+    #[arg(long)]
+    resume: Option<String>,
+
+    /// Cap on concurrent scheduled tasks (default 50).
+    #[arg(long, default_value_t = DEFAULT_MAX_TASKS)]
+    max_tasks: usize,
 }
 
 #[derive(Copy, Clone, Debug, ValueEnum)]
@@ -125,10 +161,65 @@ async fn main() -> anyhow::Result<()> {
         .api_key
         .clone()
         .or_else(|| std::env::var("DEEPSEEK_API_KEY").ok())
-        .ok_or_else(|| {
-            anyhow::anyhow!("DEEPSEEK_API_KEY not set and --api-key not provided")
-        })?;
+        .ok_or_else(|| anyhow::anyhow!("DEEPSEEK_API_KEY not set and --api-key not provided"))?;
 
+    // Build the scheduler; restore prior tasks if --resume was passed.
+    let session_id = args
+        .resume
+        .clone()
+        .unwrap_or_else(|| format!("cli-{}", uuid_short()));
+    let mut scheduler = if args.resume.is_some() {
+        Scheduler::restore(&session_id)
+    } else {
+        Scheduler::with_cap(&session_id, args.max_tasks)
+    };
+    // If the env-var is set or the user requested a smaller cap, honor it.
+    if args.max_tasks != DEFAULT_MAX_TASKS && !scheduler.is_disabled() {
+        let mut s = Scheduler::with_cap(&session_id, args.max_tasks);
+        // Move tasks across.
+        for t in scheduler.list().into_iter().cloned().collect::<Vec<_>>() {
+            // Direct insert: respects cap implicitly via re-create-on-restore.
+            let _ = s.create(t.schedule.clone(), t.prompt.clone(), t.recurring);
+        }
+        scheduler = s;
+    }
+    let scheduler = Arc::new(Mutex::new(scheduler));
+
+    let opts = build_opts(&args);
+    let http = ReqwestClient::new();
+
+    let tools_arc: Arc<Vec<Box<dyn deepseek::Tool>>> = if scheduler.lock().unwrap().is_disabled() {
+        Arc::new(default_tools())
+    } else {
+        Arc::new(default_tools_with_scheduler(scheduler.clone()))
+    };
+
+    // Fixed-interval loop: --loop-every implies --loop.
+    if let Some(interval) = args.loop_every.as_deref() {
+        let cron_expr = interval_to_cron(interval)?;
+        let prompt = resolve_loop_prompt(&args)?;
+        let cap = args.loop_max_iterations;
+        return run_fixed_interval_loop(
+            scheduler,
+            cron_expr,
+            prompt,
+            tools_arc,
+            http,
+            api_key,
+            opts,
+            cap,
+        )
+        .await;
+    }
+
+    // Dynamic / maintenance loop.
+    if args.r#loop {
+        let prompt = resolve_loop_prompt(&args)?;
+        let cap = args.loop_max_iterations;
+        return run_dynamic_loop(prompt, tools_arc, http, api_key, opts, cap).await;
+    }
+
+    // One-shot: stream a single agent run end-to-end.
     let prompt = if args.prompt.is_empty() {
         let mut buf = String::new();
         std::io::stdin().read_to_string(&mut buf)?;
@@ -139,7 +230,10 @@ async fn main() -> anyhow::Result<()> {
     if prompt.is_empty() {
         anyhow::bail!("empty prompt; pass it as positional args or via stdin");
     }
+    stream_one_run(prompt, tools_arc, http, api_key, opts).await
+}
 
+fn build_opts(args: &Args) -> RunOptions {
     let mut opts = RunOptions::new(&args.model)
         .effort(args.effort.into())
         .permission_mode(args.permission_mode.into());
@@ -149,33 +243,189 @@ async fn main() -> anyhow::Result<()> {
     if let Some(b) = args.max_budget_usd {
         opts = opts.max_budget_usd(b);
     }
-    if let Some(allowed) = args.allowed_tools {
+    if let Some(allowed) = args.allowed_tools.clone() {
         opts = opts.allowed_tools(allowed);
     }
     if !args.disallowed_tools.is_empty() {
-        opts = opts.disallowed_tools(args.disallowed_tools);
+        opts = opts.disallowed_tools(args.disallowed_tools.clone());
     }
-    if let Some(sp) = args.system_prompt {
+    if let Some(sp) = args.system_prompt.clone() {
         opts = opts.system_prompt(sp);
     } else {
         opts = opts.system_prompt(default_system_prompt());
     }
-    if let Some(b) = args.base_url {
+    if let Some(b) = args.base_url.clone() {
         opts = opts.base_url(b);
     }
+    opts
+}
 
-    let http = ReqwestClient::new();
-    let tools = Arc::new(default_tools());
+fn default_system_prompt() -> String {
+    "You are a coding agent running in a developer's terminal. Use the available tools \
+     (Read, Write, Edit, Glob, Grep, Bash, CronCreate, CronList, CronDelete, Monitor) \
+     to inspect, modify, and schedule work in the working directory. Be concise; \
+     explain only when asked."
+        .into()
+}
 
-    let mut stream =
-        Box::pin(deepseek::run(http, api_key, tools, prompt, opts));
+fn resolve_loop_prompt(args: &Args) -> anyhow::Result<String> {
+    if let Some(p) = args.loop_prompt.clone() {
+        return Ok(p);
+    }
+    if !args.prompt.is_empty() {
+        return Ok(args.prompt.join(" "));
+    }
+    Ok(maintenance::resolve_prompt())
+}
 
-    while let Some(msg) = stream.next().await {
-        if args.json {
-            println!("{}", serde_json::to_string(&msg)?);
-        } else {
-            print_pretty(&msg);
+/// Convert `5m`, `30s`, `1h`, `1d` into the closest 5-field cron expression.
+fn interval_to_cron(input: &str) -> anyhow::Result<CronExpr> {
+    let s = input.trim();
+    if s.is_empty() {
+        anyhow::bail!("--loop-every: empty interval");
+    }
+    let (num_part, unit) = s.split_at(s.len().saturating_sub(1));
+    let n: u64 = num_part
+        .parse()
+        .map_err(|e| anyhow::anyhow!("--loop-every: invalid number '{num_part}': {e}"))?;
+    if n == 0 {
+        anyhow::bail!("--loop-every: interval must be > 0");
+    }
+    let cron = match unit {
+        "s" => {
+            // Cron has 1-minute granularity; round up to 1m for sub-minute.
+            tracing::warn!(
+                "--loop-every: sub-minute interval {n}s rounded up to 1 minute (cron granularity)"
+            );
+            "*/1 * * * *".to_string()
         }
+        "m" => {
+            if n > 60 {
+                anyhow::bail!("--loop-every: minute intervals must be ≤ 60");
+            }
+            // Round to a clean cron step where possible.
+            let step = pick_cron_step(n, 60);
+            format!("*/{step} * * * *")
+        }
+        "h" => {
+            if n > 24 {
+                anyhow::bail!("--loop-every: hour intervals must be ≤ 24");
+            }
+            let step = pick_cron_step(n, 24);
+            format!("0 */{step} * * *")
+        }
+        "d" => {
+            format!("0 0 */{n} * *")
+        }
+        other => anyhow::bail!("--loop-every: unsupported unit '{other}'; use s|m|h|d"),
+    };
+    CronExpr::parse(&cron).map_err(|e| anyhow::anyhow!("--loop-every: {e}"))
+}
+
+/// Round `n` to the nearest divisor of `base` so the cron step is clean.
+fn pick_cron_step(n: u64, base: u64) -> u64 {
+    let mut best = n;
+    let mut best_diff = u64::MAX;
+    for d in 1..=base {
+        if base.is_multiple_of(d) {
+            let diff = d.abs_diff(n);
+            if diff < best_diff {
+                best_diff = diff;
+                best = d;
+            }
+        }
+    }
+    best
+}
+
+#[allow(clippy::too_many_arguments)] // private bin helper, fine
+async fn run_fixed_interval_loop(
+    scheduler: Arc<Mutex<Scheduler>>,
+    cron: CronExpr,
+    prompt: String,
+    tools: Arc<Vec<Box<dyn deepseek::Tool>>>,
+    http: ReqwestClient,
+    api_key: String,
+    opts: RunOptions,
+    max_iterations: Option<u32>,
+) -> anyhow::Result<()> {
+    // Register the loop's recurring task so it shows up in CronList.
+    let task_id = {
+        let mut s = scheduler.lock().unwrap();
+        s.create(Schedule::Cron(Box::new(cron)), prompt.clone(), true)
+            .map_err(|e| anyhow::anyhow!("scheduler: {e}"))?
+    };
+    eprintln!("/loop registered task_id={} prompt={prompt:?}", task_id.as_str());
+
+    let mut iter_count: u32 = 0;
+    loop {
+        let due = {
+            let mut s = scheduler.lock().unwrap();
+            s.tick(Utc::now())
+        };
+        for fire in due {
+            stream_one_run(
+                fire.prompt.clone(),
+                tools.clone(),
+                http.clone(),
+                api_key.clone(),
+                opts.clone(),
+            )
+            .await?;
+            iter_count += 1;
+            if let Some(cap) = max_iterations {
+                if iter_count >= cap {
+                    return Ok(());
+                }
+            }
+        }
+        // Sleep 1s between ticks; matches Claude Code's scheduler granularity.
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+}
+
+async fn run_dynamic_loop(
+    prompt: String,
+    tools: Arc<Vec<Box<dyn deepseek::Tool>>>,
+    http: ReqwestClient,
+    api_key: String,
+    opts: RunOptions,
+    max_iterations: Option<u32>,
+) -> anyhow::Result<()> {
+    eprintln!("/loop dynamic mode — prompt={prompt:?}");
+    let mut iter_count: u32 = 0;
+    loop {
+        stream_one_run(
+            prompt.clone(),
+            tools.clone(),
+            http.clone(),
+            api_key.clone(),
+            opts.clone(),
+        )
+        .await?;
+        iter_count += 1;
+        if let Some(cap) = max_iterations {
+            if iter_count >= cap {
+                return Ok(());
+            }
+        }
+        // 60-second floor between iterations (matches Claude Code's dynamic
+        // delay floor). Future work: have the agent emit a chosen-delay
+        // signal between iterations to actually vary the wait.
+        tokio::time::sleep(Duration::from_secs(60)).await;
+    }
+}
+
+async fn stream_one_run(
+    prompt: String,
+    tools: Arc<Vec<Box<dyn deepseek::Tool>>>,
+    http: ReqwestClient,
+    api_key: String,
+    opts: RunOptions,
+) -> anyhow::Result<()> {
+    let mut stream = Box::pin(deepseek::run(http, api_key, tools, prompt, opts));
+    while let Some(msg) = stream.next().await {
+        println!("{}", serde_json::to_string(&msg)?);
         if msg.is_terminal() {
             break;
         }
@@ -183,71 +433,13 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-fn default_system_prompt() -> String {
-    "You are a coding agent running in a developer's terminal. Use the available tools \
-     (Read, Write, Edit, Glob, Grep, Bash) to inspect and modify the working directory. \
-     Be concise; explain only when asked."
-        .into()
-}
-
-fn print_pretty(msg: &SdkMessage) {
-    match msg {
-        SdkMessage::System {
-            subtype: SystemSubtype::Init,
-            session_id,
-            ..
-        } => {
-            eprintln!("● session {session_id}");
-        }
-        SdkMessage::Assistant { content, .. } => {
-            for block in content {
-                match block {
-                    ContentBlock::Text { text } if !text.is_empty() => {
-                        println!("{text}");
-                    }
-                    ContentBlock::ToolUse { name, input, .. } => {
-                        let preview = serde_json::to_string(input).unwrap_or_default();
-                        let preview = if preview.len() > 120 {
-                            format!("{}…", &preview[..120])
-                        } else {
-                            preview
-                        };
-                        eprintln!("▸ {name} {preview}");
-                    }
-                    _ => {}
-                }
-            }
-        }
-        SdkMessage::User { content } => {
-            for block in content {
-                if let ContentBlock::ToolResult {
-                    tool_use_id,
-                    content,
-                    is_error,
-                } = block
-                {
-                    let head = content.lines().next().unwrap_or("");
-                    let marker = if *is_error { "✗" } else { "✓" };
-                    eprintln!("  {marker} {tool_use_id}: {head}");
-                }
-            }
-        }
-        SdkMessage::Result {
-            subtype,
-            num_turns,
-            total_cost_usd,
-            ..
-        } => {
-            let cost = total_cost_usd
-                .map(|c| format!("${c:.4}"))
-                .unwrap_or_else(|| "n/a".into());
-            let label = match subtype {
-                ResultSubtype::Success => "✓ success",
-                ResultSubtype::ErrorMaxTurns => "✗ max_turns",
-                ResultSubtype::ErrorMaxBudgetUsd => "✗ max_budget_usd",
-                ResultSubtype::ErrorDuringExecution => "✗ runtime_error",
-            };
-            eprintln!("{label} | turns={num_turns} | cost={cost}");
-        }
-    }
+fn uuid_short() -> String {
+    // Avoid pulling uuid in two places; the lib already re-exports it via
+    // the agent module. Keep this as a tiny helper.
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    format!("{nanos:x}")
 }

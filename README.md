@@ -23,7 +23,8 @@ Shared Rust client for the DeepSeek API with pluggable HTTP transport, agentic t
 | `wasm` | no | CF Workers WASM fetch transport (`?Send`) |
 | `agent` | no | Streaming agent loop (`run`, `SdkMessage`, `RunOptions`, `PermissionMode`) |
 | `builtin-tools` | no | Read / Write / Edit / Glob / Grep / Bash (implies `agent`) |
-| `cli` | no | `deepseek` binary (implies `builtin-tools` + `reqwest-client`) |
+| `scheduler` | yes | `Scheduler` + CronCreate / CronList / CronDelete / Monitor tools and `/loop` semantics (implies `agent` + `builtin-tools`) |
+| `cli` | no | `deepseek-loop` binary (implies `scheduler` + `builtin-tools` + `reqwest-client`) |
 | `cache` | no | TTL cache + in-flight dedup (dashmap, sha2, tokio) |
 
 ## Key Types
@@ -127,11 +128,45 @@ mirrors the SDK: `Default`, `AcceptEdits`, `Plan`, `DontAsk`,
 
 #### CLI (feature `cli`)
 
+The binary streams `SdkMessage` events as **NDJSON** (one JSON object per line) on stdout. Pipe it into `jq` or any line-oriented consumer.
+
 ```bash
-cargo run -p deepseek-loop --features cli --bin deepseek-loop -- "list rust files under crates/deepseek-loop"
-# Pretty mode prints AssistantMessage tool calls + final text + a one-line summary.
-# Add --json for NDJSON SdkMessage output, --max-turns N, --permission-mode plan, etc.
+# One-shot run
+cargo run -p deepseek-loop --features cli --bin deepseek-loop -- \
+    "list rust files under crates/deepseek-loop"
+
+# Read-only review (Plan mode blocks Bash/Write/Edit)
+cargo run -p deepseek-loop --features cli --bin deepseek-loop -- \
+    --permission-mode plan --max-turns 4 --max-budget-usd 0.05 \
+    "summarize the agent loop"
 ```
+
+### Scheduler / `/loop` (feature `scheduler`, on by default)
+
+Matches Claude Code's [`/loop` semantics](https://code.claude.com/docs/en/scheduled-tasks). Four built-in tools (`CronCreate`, `CronList`, `CronDelete`, `Monitor`) plus three CLI invocation shapes:
+
+```bash
+# Fixed cron interval (5 minutes between fires)
+deepseek-loop --loop-every 5m --loop-prompt "check the deploy and report" \
+    --loop-max-iterations 10
+
+# Dynamic interval — agent picks delay each iteration (60s floor)
+deepseek-loop --loop --loop-prompt "check whether CI passed and address review comments"
+
+# Bare /loop — runs the built-in maintenance prompt (or your loop.md)
+deepseek-loop --loop
+
+# Resume a prior session's tasks
+deepseek-loop --resume <session-id> --loop
+```
+
+`loop.md` discovery: `.claude/loop.md` (project) → `~/.claude/loop.md` (user) → built-in default. Capped at 25 KB.
+
+Cron grammar: 5-field `minute hour dom month dow` with `*`, `5`, `*/15`, `1-5`, `1,15,30`. Extended syntax (`L`, `W`, `?`, `MON`, `JAN`) is rejected.
+
+Limits: 50 tasks per session, recurring tasks expire 7 days after creation, deterministic jitter is applied to fire times. Set `CLAUDE_CODE_DISABLE_CRON=1` (or the `DEEPSEEK_LOOP_DISABLE_CRON=1` alias) to disable the scheduler entirely.
+
+Persistence: tasks are written to `${cache_dir}/deepseek-loop/sessions/<session_id>/tasks.json` after each mutation, restored via `--resume <session_id>`.
 
 ### Cache (feature `cache`)
 

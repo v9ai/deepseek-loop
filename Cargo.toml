@@ -1,9 +1,9 @@
 [package]
 name = "deepseek-loop"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 license = "MIT"
-description = "Claude-Code-shaped agent loop over the DeepSeek API: built-in tools, permission modes, streaming SdkMessage events"
+description = "Claude-Code-shaped agent loop over the DeepSeek API: built-in tools, permission modes, cron scheduler with /loop semantics, streaming SdkMessage events"
 repository = "https://github.com/nicolad/ai-apps"
 readme = "README.md"
 keywords = ["deepseek", "agent", "llm", "tools", "loop"]
@@ -13,7 +13,7 @@ categories = ["api-bindings", "command-line-utilities"]
 name = "deepseek"
 
 [features]
-default = ["reqwest-client"]
+default = ["reqwest-client", "scheduler"]
 reqwest-client = ["dep:reqwest", "dep:anyhow", "dep:tokio"]
 wasm = ["dep:worker", "dep:js-sys"]
 cache = ["dep:dashmap", "dep:sha2", "dep:tokio"]
@@ -21,9 +21,21 @@ cache = ["dep:dashmap", "dep:sha2", "dep:tokio"]
 agent = ["dep:tokio", "dep:async-stream", "dep:futures", "dep:uuid"]
 # Built-in tool implementations (Read/Write/Edit/Glob/Grep/Bash).
 builtin-tools = ["agent", "dep:globset", "dep:walkdir", "dep:regex"]
-# CLI binary `deepseek`.
+# Cron-style scheduler with CronCreate/List/Delete + Monitor tools, /loop semantics,
+# session-scoped persistence. Adds the four new built-in tools when combined with
+# `builtin-tools`.
+scheduler = [
+    "agent",
+    "builtin-tools",
+    "dep:cron",
+    "dep:chrono",
+    "dep:dirs",
+    "dep:tempfile",
+]
+# CLI binary `deepseek-loop`.
 cli = [
     "builtin-tools",
+    "scheduler",
     "reqwest-client",
     "dep:clap",
     "dep:tracing-subscriber",
@@ -64,6 +76,12 @@ uuid         = { workspace = true, optional = true }
 globset = { version = "0.4", optional = true }
 walkdir = { workspace = true, optional = true }
 regex   = { workspace = true, optional = true }
+
+# scheduler feature
+cron     = { version = "0.15", optional = true }
+chrono   = { version = "0.4", default-features = false, features = ["clock", "serde"], optional = true }
+dirs     = { version = "6", optional = true }
+tempfile = { version = "3", optional = true }
 
 # cli feature
 clap               = { workspace = true, optional = true }

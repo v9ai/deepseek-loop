@@ -22,6 +22,9 @@ pub mod tool;
 #[cfg(feature = "builtin-tools")]
 pub mod builtin_tools;
 
+#[cfg(feature = "scheduler")]
+pub mod scheduler;
+
 pub use builder::{AgentBuilder, DeepSeekAgent};
 pub use loop_runner::run;
 pub use messages::{ContentBlock, ResultSubtype, SdkMessage, SystemSubtype};

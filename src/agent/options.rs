@@ -10,6 +10,7 @@ use super::permissions::{PermissionMode, PreToolHook};
 ///
 /// Mirrors `ClaudeAgentOptions` / `Options` from the Claude Agent SDK, scoped
 /// to the fields meaningful for a non-streaming OpenAI-compatible loop.
+#[derive(Clone)]
 pub struct RunOptions {
     pub model: String,
     pub system_prompt: String,
