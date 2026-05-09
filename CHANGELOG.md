@@ -1,5 +1,32 @@
 # Changelog
 
+## 0.3.6 — 2026-05-09
+
+### Tests
+
+- Added 27 new tests (total: 130) closing coverage gaps in the cron tool
+  wrappers and maintenance helpers. Untested or thinly-tested modules now have
+  meaningful suites:
+  - `cron_list` (0 → 4): empty/multi-kind listings, definition shape, payload
+    fields surface task id / prompt / recurring.
+  - `cron_delete` (0 → 5): definition required-fields check, unknown-id
+    returns `deleted=false`, repeat-delete idempotency, missing/non-string
+    arg errors.
+  - `cron_create` (3 → 10): default-recurring matrix for `at`/`dynamic`/cron,
+    explicit-recurring override, invalid cron / invalid `at` / missing
+    prompt errors, capacity-exceeded path.
+  - `monitor` (2 → 8): definition required-fields, missing-arg error,
+    non-zero exit-code captured, stderr ignored, default `label`,
+    truncation past `MAX_LINES_RETURNED`.
+  - `maintenance` (1 → 6): built-in prompt structure, `LOOP_MD_BYTE_CAP`
+    pinned at 25k, `read_capped` returns `None` for missing files, full
+    contents under cap, truncates oversized files. `read_capped` lifted
+    to `pub(crate)` for direct testability.
+
+### Notes
+
+- No behavior changes. This release is tests-only.
+
 ## 0.3.5 — 2026-05-09
 
 ### Fixed

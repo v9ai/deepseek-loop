@@ -198,4 +198,130 @@ mod tests {
         let err = create.call_json(json!({"prompt": "x"})).await.unwrap_err();
         assert!(err.contains("one of"), "got: {err}");
     }
+
+    #[tokio::test]
+    async fn at_default_recurring_is_false() {
+        let sched = fresh_sched();
+        let create = CronCreateTool::new(sched);
+        let future = (Utc::now() + chrono::Duration::hours(1)).to_rfc3339();
+        let raw = create
+            .call_json(json!({
+                "at": future,
+                "prompt": "ping me later",
+            }))
+            .await
+            .unwrap();
+        let v: Value = serde_json::from_str(&raw).unwrap();
+        assert_eq!(v["recurring"].as_bool().unwrap(), false);
+    }
+
+    #[tokio::test]
+    async fn dynamic_default_recurring_is_true() {
+        let sched = fresh_sched();
+        let create = CronCreateTool::new(sched);
+        let raw = create
+            .call_json(json!({
+                "dynamic": true,
+                "prompt": "loop me",
+            }))
+            .await
+            .unwrap();
+        let v: Value = serde_json::from_str(&raw).unwrap();
+        assert_eq!(v["recurring"].as_bool().unwrap(), true);
+    }
+
+    #[tokio::test]
+    async fn recurring_override_wins() {
+        let sched = fresh_sched();
+        let create = CronCreateTool::new(sched);
+        // cron defaults to recurring=true; explicit false should win.
+        let raw = create
+            .call_json(json!({
+                "cron": "*/5 * * * *",
+                "prompt": "once-only via cron",
+                "recurring": false,
+            }))
+            .await
+            .unwrap();
+        let v: Value = serde_json::from_str(&raw).unwrap();
+        assert_eq!(v["recurring"].as_bool().unwrap(), false);
+    }
+
+    #[tokio::test]
+    async fn invalid_cron_surfaces_error() {
+        let sched = fresh_sched();
+        let create = CronCreateTool::new(sched);
+        let err = create
+            .call_json(json!({
+                "cron": "0 9 * * MON",
+                "prompt": "x"
+            }))
+            .await
+            .unwrap_err();
+        assert!(
+            err.contains("CronCreate") && err.contains("unsupported"),
+            "got: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn invalid_at_timestamp_surfaces_error() {
+        let sched = fresh_sched();
+        let create = CronCreateTool::new(sched);
+        let err = create
+            .call_json(json!({
+                "at": "not-a-timestamp",
+                "prompt": "x"
+            }))
+            .await
+            .unwrap_err();
+        assert!(err.contains("invalid `at`"), "got: {err}");
+    }
+
+    #[tokio::test]
+    async fn missing_prompt_returns_error() {
+        let sched = fresh_sched();
+        let create = CronCreateTool::new(sched);
+        let err = create
+            .call_json(json!({"cron": "*/5 * * * *"}))
+            .await
+            .unwrap_err();
+        assert!(err.contains("missing string `prompt`"), "got: {err}");
+    }
+
+    #[tokio::test]
+    async fn capacity_exceeded_surfaces_error() {
+        std::env::remove_var("CLAUDE_CODE_DISABLE_CRON");
+        std::env::remove_var("DEEPSEEK_LOOP_DISABLE_CRON");
+        let sched = Arc::new(Mutex::new(crate::agent::scheduler::Scheduler::with_cap(
+            "cap-test", 2,
+        )));
+        let create = CronCreateTool::new(sched);
+
+        // Two creates ok.
+        for i in 0..2 {
+            create
+                .call_json(json!({
+                    "cron": "*/5 * * * *",
+                    "prompt": format!("p{i}"),
+                }))
+                .await
+                .unwrap();
+        }
+
+        // Third should fail with capacity message.
+        let err = create
+            .call_json(json!({
+                "cron": "*/5 * * * *",
+                "prompt": "overflow"
+            }))
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_lowercase().contains("cap")
+                || err.to_lowercase().contains("max")
+                || err.to_lowercase().contains("limit"),
+            "got: {err}"
+        );
+    }
 }

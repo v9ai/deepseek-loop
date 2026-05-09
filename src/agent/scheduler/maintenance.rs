@@ -42,7 +42,7 @@ pub fn resolve_prompt() -> String {
     BUILT_IN_MAINTENANCE_PROMPT.to_string()
 }
 
-fn read_capped(path: PathBuf) -> Option<String> {
+pub(crate) fn read_capped(path: PathBuf) -> Option<String> {
     let raw = fs::read_to_string(&path).ok()?;
     if raw.len() <= LOOP_MD_BYTE_CAP {
         Some(raw)
@@ -54,10 +54,53 @@ fn read_capped(path: PathBuf) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Write;
 
     #[test]
     fn built_in_prompt_is_non_empty() {
         assert!(!BUILT_IN_MAINTENANCE_PROMPT.is_empty());
         assert!(BUILT_IN_MAINTENANCE_PROMPT.contains("Continue"));
+    }
+
+    #[test]
+    fn built_in_prompt_mentions_pull_request_and_cleanup() {
+        // Sanity-check the structure of the spec: PRs and cleanup are
+        // explicitly part of the maintenance loop.
+        assert!(BUILT_IN_MAINTENANCE_PROMPT.contains("pull request"));
+        assert!(BUILT_IN_MAINTENANCE_PROMPT.contains("cleanup"));
+    }
+
+    #[test]
+    fn loop_md_byte_cap_is_25kb() {
+        assert_eq!(LOOP_MD_BYTE_CAP, 25_000);
+    }
+
+    #[test]
+    fn read_capped_returns_none_for_missing_file() {
+        let bogus = PathBuf::from("/nonexistent/path/loop.md");
+        assert!(read_capped(bogus).is_none());
+    }
+
+    #[test]
+    fn read_capped_returns_full_content_under_cap() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("small.md");
+        let mut f = fs::File::create(&p).unwrap();
+        f.write_all(b"hello world").unwrap();
+        let got = read_capped(p).unwrap();
+        assert_eq!(got, "hello world");
+    }
+
+    #[test]
+    fn read_capped_truncates_oversized_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("big.md");
+        let mut f = fs::File::create(&p).unwrap();
+        // 30k bytes of `a`. Cap is 25k.
+        let payload = "a".repeat(30_000);
+        f.write_all(payload.as_bytes()).unwrap();
+        let got = read_capped(p).unwrap();
+        assert_eq!(got.len(), LOOP_MD_BYTE_CAP);
+        assert!(got.chars().all(|c| c == 'a'));
     }
 }

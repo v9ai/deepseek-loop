@@ -175,4 +175,80 @@ mod tests {
         let v: Value = serde_json::from_str(&raw).unwrap();
         assert_eq!(v["timed_out"].as_bool().unwrap(), true);
     }
+
+    #[test]
+    fn definition_marks_command_required() {
+        let def = MonitorTool.definition();
+        assert_eq!(def.name, "Monitor");
+        let required = def.parameters.get("required").unwrap().as_array().unwrap();
+        assert!(required.iter().any(|v| v == "command"));
+    }
+
+    #[tokio::test]
+    async fn missing_command_returns_error() {
+        let err = MonitorTool.call_json(json!({})).await.unwrap_err();
+        assert!(err.contains("missing"), "got: {err}");
+    }
+
+    #[tokio::test]
+    async fn nonzero_exit_code_is_captured() {
+        let raw = MonitorTool
+            .call_json(json!({
+                "command": "exit 7",
+                "timeout_ms": 5000
+            }))
+            .await
+            .unwrap();
+        let v: Value = serde_json::from_str(&raw).unwrap();
+        assert_eq!(v["exit_code"].as_i64().unwrap(), 7);
+        assert_eq!(v["timed_out"].as_bool().unwrap(), false);
+        assert_eq!(v["lines"].as_array().unwrap().len(), 0);
+    }
+
+    #[tokio::test]
+    async fn stderr_is_not_collected() {
+        let raw = MonitorTool
+            .call_json(json!({
+                "command": "echo on-stdout; echo on-stderr 1>&2",
+                "timeout_ms": 5000
+            }))
+            .await
+            .unwrap();
+        let v: Value = serde_json::from_str(&raw).unwrap();
+        let lines: Vec<String> = v["lines"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|x| x.as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(lines, vec!["on-stdout"]);
+    }
+
+    #[tokio::test]
+    async fn default_label_is_monitor_when_omitted() {
+        let raw = MonitorTool
+            .call_json(json!({
+                "command": "true",
+                "timeout_ms": 5000
+            }))
+            .await
+            .unwrap();
+        let v: Value = serde_json::from_str(&raw).unwrap();
+        assert_eq!(v["label"].as_str().unwrap(), "monitor");
+    }
+
+    #[tokio::test]
+    async fn truncates_after_max_lines() {
+        // Emit 1005 lines; we should keep at most 1000 and flag truncated=true.
+        let raw = MonitorTool
+            .call_json(json!({
+                "command": "for i in $(seq 1 1005); do echo $i; done",
+                "timeout_ms": 10000
+            }))
+            .await
+            .unwrap();
+        let v: Value = serde_json::from_str(&raw).unwrap();
+        assert_eq!(v["truncated"].as_bool().unwrap(), true);
+        assert_eq!(v["lines"].as_array().unwrap().len(), 1000);
+    }
 }
