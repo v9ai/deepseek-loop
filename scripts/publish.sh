@@ -24,6 +24,10 @@ CF_STORE_ID="ec928f4771fb4577a607a0b122e8087e"
 CF_SECRET_NAME="CRATES_IO_TOKEN"
 WORKER_NAME="cargo-token-fetch-temp"
 FEATURES="scheduler,builtin-tools,reqwest-client,cache,cli"
+GITHUB_REPO="v9ai/deepseek-loop"
+# Topics added on every publish (additive; no remove). Keep this list short
+# and focused on discoverability — crates.io already drives traffic.
+GITHUB_TOPICS=("rust" "deepseek" "agent" "llm" "claude-code" "cron-scheduler" "tool-use" "cli")
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
@@ -133,3 +137,24 @@ color "publish: cargo publish --features cli"
 cargo publish --features cli
 
 color "publish: deepseek-loop v${VERSION} uploaded to crates.io"
+
+# Sync GitHub repo metadata with Cargo.toml. Idempotent — re-running yields
+# the same description, homepage, and topic set. Failures here are
+# non-fatal: the crate is already on crates.io.
+if command -v gh >/dev/null 2>&1; then
+    DESC="$(awk -F'"' '/^description =/ { print $2; exit }' Cargo.toml)"
+    HOMEPAGE="https://crates.io/crates/deepseek-loop"
+    TOPIC_ARGS=()
+    for t in "${GITHUB_TOPICS[@]}"; do
+        TOPIC_ARGS+=(--add-topic "$t")
+    done
+    color "publish: gh repo edit $GITHUB_REPO (description, homepage, topics)"
+    if ! gh repo edit "$GITHUB_REPO" \
+        --description "$DESC" \
+        --homepage "$HOMEPAGE" \
+        "${TOPIC_ARGS[@]}" 2>&1; then
+        warn "publish: gh repo edit failed (non-fatal — crate is published)"
+    fi
+else
+    warn "publish: gh CLI not on PATH; skipping repo metadata sync"
+fi
