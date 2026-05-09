@@ -8,6 +8,7 @@ repository = "https://github.com/v9ai/deepseek-loop"
 readme = "README.md"
 keywords = ["deepseek", "agent", "llm", "tools", "loop"]
 categories = ["api-bindings", "command-line-utilities"]
+exclude = ["scripts/", "Makefile", ".github/"]
 
 [lib]
 name = "deepseek"
