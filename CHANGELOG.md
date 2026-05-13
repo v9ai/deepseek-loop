@@ -1,5 +1,36 @@
 # Changelog
 
+## 0.4.0 — 2026-05-13
+
+### Cost efficiency
+
+- `UsageInfo` now carries optional `prompt_cache_hit_tokens` /
+  `prompt_cache_miss_tokens` so callers see DeepSeek's prompt-cache split.
+  `serde(default, skip_serializing_if = Option::is_none)` keeps the wire
+  format backwards-compatible.
+- `ModelPricing` adds a `cached_input_per_mtok` rate and the per-model
+  table is updated to reflect DeepSeek's published cache-hit / cache-miss
+  pricing. `turn_cost_usd` now takes `&UsageInfo` and charges the
+  cache-hit portion at the discounted rate (typically ~25% of miss).
+  Reported `total_cost_usd` now matches the bill DeepSeek actually
+  charges for long-running tool loops instead of overstating it by the
+  cache-hit discount.
+
+### Features
+
+- New opt-in **natural-language history compaction** for the agent loop.
+  Set `RunOptions::compaction(CompactionConfig { ... })` to have the loop
+  periodically summarize old turns into a short text summary, dropping
+  the originals and bounding prompt-token growth on long tool loops. The
+  default config triggers at `prompt_tokens >= 32_000`, keeps the most
+  recent 3 turns verbatim, and uses `deepseek-chat` as the (cheap)
+  compactor. Compaction preserves tool-call/tool-result pair atomicity
+  and is non-fatal on compactor errors.
+- New `SystemSubtype::Compact` variant emitted by the stream on a
+  successful compaction step. **This is an additive but non-exhaustive
+  change** — downstream consumers that exhaustively match on
+  `SystemSubtype` need to handle the new variant.
+
 ## 0.3.6 — 2026-05-09
 
 ### Tests

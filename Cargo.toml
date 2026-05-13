@@ -1,6 +1,6 @@
 [package]
 name = "deepseek-loop"
-version = "0.3.6"
+version = "0.4.0"
 edition = "2021"
 license = "MIT"
 description = "Claude-Code-shaped agent loop over the DeepSeek API: built-in tools, permission modes, cron scheduler with /loop semantics, streaming SdkMessage events"

@@ -169,6 +169,7 @@ impl RunOptions {
             pre_tool_hook: self.pre_tool_hook.clone(),
             session_id: self.session_id.clone(),
             base_url: self.base_url.clone(),
+            compaction: self.compaction.clone(),
         }
     }
 }

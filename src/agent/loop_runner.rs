@@ -26,7 +26,7 @@ use crate::types::{
 };
 
 use super::messages::{ContentBlock, ResultSubtype, SdkMessage, SystemSubtype};
-use super::options::RunOptions;
+use super::options::{CompactionConfig, RunOptions};
 use super::permissions::{PermissionDecision, PermissionMode};
 use super::pricing::{map_stop_reason, turn_cost_usd};
 use super::tool::Tool;
@@ -117,8 +117,13 @@ where
         let mut num_turns: u32 = 0;
         let mut total_prompt_tokens: u32 = 0;
         let mut total_completion_tokens: u32 = 0;
-        let mut total_cost: Option<f64> = turn_cost_usd(&opts.model, 0, 0).map(|_| 0.0);
+        let mut total_cache_hit_tokens: u32 = 0;
+        let mut total_cache_miss_tokens: u32 = 0;
+        let mut any_cache_stats_seen = false;
+        let mut total_cost: Option<f64> =
+            super::pricing::model_pricing(&opts.model).map(|_| 0.0);
         let mut last_stop_reason: Option<String> = None;
+        let mut last_turn_prompt_tokens: u32 = 0;
 
         loop {
             let request = ChatRequest {
@@ -150,7 +155,7 @@ where
                         subtype: ResultSubtype::ErrorDuringExecution,
                         result: None,
                         total_cost_usd: total_cost,
-                        usage: usage_info(total_prompt_tokens, total_completion_tokens),
+                        usage: usage_info(total_prompt_tokens, total_completion_tokens, total_cache_hit_tokens, total_cache_miss_tokens, any_cache_stats_seen),
                         num_turns,
                         session_id,
                         stop_reason: last_stop_reason,
@@ -161,11 +166,20 @@ where
 
             // Accumulate usage / cost from this turn.
             if let Some(u) = &resp.usage {
+                last_turn_prompt_tokens = u.prompt_tokens;
                 total_prompt_tokens = total_prompt_tokens.saturating_add(u.prompt_tokens);
                 total_completion_tokens = total_completion_tokens.saturating_add(u.completion_tokens);
+                if let Some(h) = u.prompt_cache_hit_tokens {
+                    total_cache_hit_tokens = total_cache_hit_tokens.saturating_add(h);
+                    any_cache_stats_seen = true;
+                }
+                if let Some(m) = u.prompt_cache_miss_tokens {
+                    total_cache_miss_tokens = total_cache_miss_tokens.saturating_add(m);
+                    any_cache_stats_seen = true;
+                }
                 if let (Some(running), Some(turn)) = (
                     total_cost.as_mut(),
-                    turn_cost_usd(&opts.model, u.prompt_tokens, u.completion_tokens),
+                    turn_cost_usd(&opts.model, u),
                 ) {
                     *running += turn;
                 }
@@ -176,7 +190,7 @@ where
                     subtype: ResultSubtype::ErrorDuringExecution,
                     result: None,
                     total_cost_usd: total_cost,
-                    usage: usage_info(total_prompt_tokens, total_completion_tokens),
+                    usage: usage_info(total_prompt_tokens, total_completion_tokens, total_cache_hit_tokens, total_cache_miss_tokens, any_cache_stats_seen),
                     num_turns,
                     session_id,
                     stop_reason: last_stop_reason,
@@ -337,7 +351,7 @@ where
                             subtype: ResultSubtype::ErrorMaxTurns,
                             result: None,
                             total_cost_usd: total_cost,
-                            usage: usage_info(total_prompt_tokens, total_completion_tokens),
+                            usage: usage_info(total_prompt_tokens, total_completion_tokens, total_cache_hit_tokens, total_cache_miss_tokens, any_cache_stats_seen),
                             num_turns,
                             session_id,
                             stop_reason: last_stop_reason,
@@ -351,12 +365,62 @@ where
                             subtype: ResultSubtype::ErrorMaxBudgetUsd,
                             result: None,
                             total_cost_usd: total_cost,
-                            usage: usage_info(total_prompt_tokens, total_completion_tokens),
+                            usage: usage_info(total_prompt_tokens, total_completion_tokens, total_cache_hit_tokens, total_cache_miss_tokens, any_cache_stats_seen),
                             num_turns,
                             session_id,
                             stop_reason: last_stop_reason,
                         };
                         return;
+                    }
+                }
+
+                // Optional history compaction. Triggered only when the
+                // previous turn's prompt_tokens crossed the configured
+                // threshold; failure is non-fatal and falls through to a
+                // full-history retry on the next iteration.
+                if let Some(cfg) = opts.compaction.as_ref() {
+                    if last_turn_prompt_tokens >= cfg.threshold_prompt_tokens {
+                        match compact_history(&http, &api_key, &opts, cfg, &mut messages).await {
+                            Ok(outcome) => {
+                                if let Some(u) = &outcome.usage {
+                                    total_prompt_tokens =
+                                        total_prompt_tokens.saturating_add(u.prompt_tokens);
+                                    total_completion_tokens = total_completion_tokens
+                                        .saturating_add(u.completion_tokens);
+                                    if let Some(h) = u.prompt_cache_hit_tokens {
+                                        total_cache_hit_tokens =
+                                            total_cache_hit_tokens.saturating_add(h);
+                                        any_cache_stats_seen = true;
+                                    }
+                                    if let Some(m) = u.prompt_cache_miss_tokens {
+                                        total_cache_miss_tokens =
+                                            total_cache_miss_tokens.saturating_add(m);
+                                        any_cache_stats_seen = true;
+                                    }
+                                    if let (Some(running), Some(turn)) = (
+                                        total_cost.as_mut(),
+                                        turn_cost_usd(&cfg.compactor_model, u),
+                                    ) {
+                                        *running += turn;
+                                    }
+                                }
+                                if outcome.rewrote {
+                                    yield SdkMessage::System {
+                                        subtype: SystemSubtype::Compact,
+                                        session_id: session_id.clone(),
+                                        data: json!({
+                                            "message_count_after": messages.len(),
+                                        }),
+                                    };
+                                }
+                            }
+                            Err(e) => {
+                                tracing::warn!(
+                                    error = %e,
+                                    "history compaction failed; continuing with full history"
+                                );
+                            }
+                        }
                     }
                 }
             } else {
@@ -370,7 +434,7 @@ where
                     subtype: ResultSubtype::Success,
                     result: Some(text),
                     total_cost_usd: total_cost,
-                    usage: usage_info(total_prompt_tokens, total_completion_tokens),
+                    usage: usage_info(total_prompt_tokens, total_completion_tokens, total_cache_hit_tokens, total_cache_miss_tokens, any_cache_stats_seen),
                     num_turns,
                     session_id,
                     stop_reason: last_stop_reason,
@@ -381,7 +445,192 @@ where
     }
 }
 
-fn usage_info(prompt: u32, completion: u32) -> Option<UsageInfo> {
+/// Result of a [`compact_history`] call.
+struct CompactionOutcome {
+    /// Usage reported by the compactor API call. `None` if the helper
+    /// short-circuited before making the call (e.g. not enough history to
+    /// compact).
+    usage: Option<UsageInfo>,
+    /// True iff `messages` was actually rewritten. False when the helper
+    /// short-circuited or the model returned an empty summary.
+    rewrote: bool,
+}
+
+/// Truncate `s` to at most `max` bytes on a UTF-8 char boundary, appending
+/// an ellipsis when truncation occurred.
+fn truncate_for_transcript(s: &str, max: usize) -> String {
+    if s.len() <= max {
+        s.to_string()
+    } else {
+        let mut end = max;
+        while end > 0 && !s.is_char_boundary(end) {
+            end -= 1;
+        }
+        format!("{}…", &s[..end])
+    }
+}
+
+/// Compact the middle of `messages` into a synthetic summary system message,
+/// preserving the system prompt, the initial user message, and the most
+/// recent `cfg.keep_recent_turns` complete turns.
+///
+/// Returns `Ok(CompactionOutcome { rewrote: false, .. })` when there isn't
+/// enough history to compact or when the compactor returned an empty
+/// summary. Transport errors propagate as `Err` and are treated as
+/// non-fatal by the agent loop.
+async fn compact_history<H>(
+    http: &H,
+    api_key: &str,
+    opts: &RunOptions,
+    cfg: &CompactionConfig,
+    messages: &mut Vec<ChatMessage>,
+) -> crate::error::Result<CompactionOutcome>
+where
+    H: HttpClient + Send + Sync,
+{
+    // head_end: past system (if present) + initial user message.
+    let head_end = match messages.first().map(|m| m.role.as_str()) {
+        Some("system") => {
+            if matches!(messages.get(1).map(|m| m.role.as_str()), Some("user")) {
+                2
+            } else {
+                1
+            }
+        }
+        Some("user") => 1,
+        _ => {
+            return Ok(CompactionOutcome {
+                usage: None,
+                rewrote: false,
+            })
+        }
+    };
+
+    // tail_start: index of the (keep_recent_turns)-th-from-end assistant
+    // message. A "turn" begins at an assistant message; tool messages that
+    // follow it belong to the same turn and are kept atomically.
+    let assistant_idxs: Vec<usize> = messages
+        .iter()
+        .enumerate()
+        .filter(|(_, m)| m.role == "assistant")
+        .map(|(i, _)| i)
+        .collect();
+    if (assistant_idxs.len() as u32) <= cfg.keep_recent_turns {
+        return Ok(CompactionOutcome {
+            usage: None,
+            rewrote: false,
+        });
+    }
+    let tail_start = assistant_idxs[assistant_idxs.len() - cfg.keep_recent_turns as usize];
+    if tail_start <= head_end {
+        return Ok(CompactionOutcome {
+            usage: None,
+            rewrote: false,
+        });
+    }
+
+    // Serialize the middle slice into a compact transcript.
+    let mut transcript = String::new();
+    for msg in &messages[head_end..tail_start] {
+        let content_text = msg.content.as_str();
+        match msg.role.as_str() {
+            "assistant" => {
+                if !content_text.trim().is_empty() {
+                    transcript.push_str(&format!(
+                        "[assistant] {}\n",
+                        truncate_for_transcript(content_text.trim(), 400)
+                    ));
+                }
+                if let Some(calls) = &msg.tool_calls {
+                    for c in calls {
+                        transcript.push_str(&format!(
+                            "  [tool_call name={} args={}]\n",
+                            c.function.name,
+                            truncate_for_transcript(&c.function.arguments, 400)
+                        ));
+                    }
+                }
+            }
+            "tool" => {
+                let id = msg.tool_call_id.as_deref().unwrap_or("?");
+                transcript.push_str(&format!(
+                    "  [tool_result id={}] {}\n",
+                    id,
+                    truncate_for_transcript(content_text, 500)
+                ));
+            }
+            other => {
+                transcript.push_str(&format!(
+                    "[{}] {}\n",
+                    other,
+                    truncate_for_transcript(content_text, 400)
+                ));
+            }
+        }
+    }
+
+    let system_prompt = "You are a conversation-history compactor. Produce a concise structured summary of the conversation segment provided. Preserve: files read or written (with paths), tool calls made (by name and key arguments), test results, decisions reached, and open questions. Drop: verbose tool output, intermediate reasoning, formatting noise. Output prose only — no markdown headers, no lists longer than 5 items. Stay under the model's max_tokens budget.";
+
+    let request = ChatRequest {
+        model: cfg.compactor_model.clone(),
+        messages: vec![
+            crate::types::system_msg(system_prompt),
+            crate::types::user_msg(&format!(
+                "Conversation segment to summarize:\n\n{transcript}"
+            )),
+        ],
+        tools: None,
+        tool_choice: None,
+        temperature: Some(0.2),
+        max_tokens: Some(cfg.max_summary_tokens),
+        stream: Some(false),
+        reasoning_effort: None,
+        thinking: None,
+    };
+
+    let url = format!("{}/chat/completions", opts.base_url);
+    let resp = http.post_json(&url, api_key, &request).await?;
+    let usage = resp.usage.clone();
+
+    let Some(choice) = resp.choices.into_iter().next() else {
+        return Ok(CompactionOutcome {
+            usage,
+            rewrote: false,
+        });
+    };
+    let summary = choice.message.content.as_str().trim().to_string();
+    if summary.is_empty() {
+        return Ok(CompactionOutcome {
+            usage,
+            rewrote: false,
+        });
+    }
+
+    let replacement = ChatMessage {
+        role: "system".into(),
+        content: ChatContent::Text(format!(
+            "[Compacted summary of earlier conversation]\n\n{summary}"
+        )),
+        reasoning_content: None,
+        tool_calls: None,
+        tool_call_id: None,
+        name: None,
+    };
+    messages.splice(head_end..tail_start, std::iter::once(replacement));
+
+    Ok(CompactionOutcome {
+        usage,
+        rewrote: true,
+    })
+}
+
+fn usage_info(
+    prompt: u32,
+    completion: u32,
+    cache_hit: u32,
+    cache_miss: u32,
+    cache_stats_seen: bool,
+) -> Option<UsageInfo> {
     if prompt == 0 && completion == 0 {
         None
     } else {
@@ -389,6 +638,8 @@ fn usage_info(prompt: u32, completion: u32) -> Option<UsageInfo> {
             prompt_tokens: prompt,
             completion_tokens: completion,
             total_tokens: prompt.saturating_add(completion),
+            prompt_cache_hit_tokens: cache_stats_seen.then_some(cache_hit),
+            prompt_cache_miss_tokens: cache_stats_seen.then_some(cache_miss),
         })
     }
 }
@@ -415,15 +666,23 @@ mod tests {
     /// Returns a queued sequence of [`ChatResponse`] values, panicking if the
     /// loop calls the API more times than expected. `seen_requests` is shared
     /// across clones so tests can inspect it after the loop has consumed the
-    /// mock.
+    /// mock. The queue can also contain `Err` to drive transport-failure
+    /// paths.
     #[derive(Clone)]
     struct MockHttp {
-        queue: Arc<Mutex<Vec<ChatResponse>>>,
+        queue: Arc<Mutex<Vec<DResult<ChatResponse>>>>,
         seen_requests: Arc<Mutex<Vec<ChatRequest>>>,
     }
 
     impl MockHttp {
         fn new(queue: Vec<ChatResponse>) -> Self {
+            Self {
+                queue: Arc::new(Mutex::new(queue.into_iter().map(Ok).collect())),
+                seen_requests: Arc::new(Mutex::new(Vec::new())),
+            }
+        }
+
+        fn new_with_results(queue: Vec<DResult<ChatResponse>>) -> Self {
             Self {
                 queue: Arc::new(Mutex::new(queue)),
                 seen_requests: Arc::new(Mutex::new(Vec::new())),
@@ -442,7 +701,7 @@ mod tests {
             self.seen_requests.lock().unwrap().push(body.clone());
             let mut q = self.queue.lock().unwrap();
             assert!(!q.is_empty(), "MockHttp: queue exhausted");
-            Ok(q.remove(0))
+            q.remove(0)
         }
     }
 
@@ -465,6 +724,7 @@ mod tests {
                 prompt_tokens: 10,
                 completion_tokens: 5,
                 total_tokens: 15,
+                ..Default::default()
             }),
         }
     }
@@ -495,6 +755,7 @@ mod tests {
                 prompt_tokens: 8,
                 completion_tokens: 4,
                 total_tokens: 12,
+                ..Default::default()
             }),
         }
     }
@@ -711,5 +972,240 @@ mod tests {
             .map(|s| s.iter().map(|t| t.function.name.clone()).collect())
             .unwrap_or_default();
         assert_eq!(names, vec!["echo_ro".to_string()]);
+    }
+
+    /// Build a tool_call response with a custom `prompt_tokens` value so a
+    /// test can drive the compaction trigger threshold.
+    fn assistant_tool_call_with_prompt(
+        id: &str,
+        name: &str,
+        args: serde_json::Value,
+        prompt_tokens: u32,
+    ) -> ChatResponse {
+        let mut r = assistant_tool_call(id, name, args);
+        if let Some(u) = r.usage.as_mut() {
+            u.prompt_tokens = prompt_tokens;
+            u.total_tokens = prompt_tokens.saturating_add(u.completion_tokens);
+        }
+        r
+    }
+
+    fn compaction_cfg() -> CompactionConfig {
+        CompactionConfig {
+            threshold_prompt_tokens: 100,
+            keep_recent_turns: 1,
+            compactor_model: "deepseek-chat".into(),
+            max_summary_tokens: 64,
+        }
+    }
+
+    #[tokio::test]
+    async fn compaction_triggers_when_prompt_tokens_exceed_threshold() {
+        // Two tool-call turns each report prompt_tokens above the threshold.
+        // After the second turn, compaction fires (assistant count > 1),
+        // the compactor mock returns a summary, then the third main turn
+        // closes the loop with text.
+        let queue = vec![
+            assistant_tool_call_with_prompt("c1", "echo_ro", json!({}), 200),
+            assistant_tool_call_with_prompt("c2", "echo_ro", json!({}), 200),
+            assistant_text("summary of earlier turns"),
+            assistant_text("done"),
+        ];
+        let http = MockHttp::new(queue);
+        let mock = http.clone();
+        let msgs = collect(
+            http,
+            tools(vec![("echo_ro", true)]),
+            "hi",
+            RunOptions::default()
+                .permission_mode(PermissionMode::BypassPermissions)
+                .compaction(compaction_cfg()),
+        )
+        .await;
+
+        let seen = mock.seen_requests.lock().unwrap();
+        assert_eq!(seen.len(), 4, "expected 2 main + 1 compactor + 1 main");
+
+        // Third request is the compactor call — different model, no tools,
+        // no thinking, low max_tokens.
+        let compactor_req = &seen[2];
+        assert_eq!(compactor_req.model, "deepseek-chat");
+        assert!(compactor_req.tools.is_none());
+        assert!(compactor_req.thinking.is_none());
+        assert_eq!(compactor_req.max_tokens, Some(64));
+
+        // Fourth request (post-compaction main turn) should carry fewer
+        // messages than the un-compacted history would have produced.
+        // History before compaction after turn 2 was 5 messages
+        // (user, asst1, tool1, asst2, tool2). After compaction it should
+        // be 4 (user, summary_system, asst2, tool2).
+        let post_compact_req = &seen[3];
+        assert_eq!(
+            post_compact_req.messages.len(),
+            4,
+            "post-compaction history should be [user, summary, last_assistant, last_tool_result]"
+        );
+        assert_eq!(post_compact_req.messages[1].role, "system");
+        assert!(post_compact_req.messages[1]
+            .content
+            .as_str()
+            .contains("Compacted summary"));
+
+        // A System{Compact} event was yielded.
+        assert!(
+            msgs.iter().any(|m| matches!(
+                m,
+                SdkMessage::System {
+                    subtype: SystemSubtype::Compact,
+                    ..
+                }
+            )),
+            "expected a SystemSubtype::Compact event in the stream"
+        );
+    }
+
+    #[tokio::test]
+    async fn compaction_preserves_tool_call_pairs() {
+        // Same shape as the trigger test; assert that every assistant
+        // message with tool_calls in the post-compaction main request is
+        // immediately followed by tool-role messages whose tool_call_ids
+        // match the assistant's tool_calls — the API invariant.
+        let queue = vec![
+            assistant_tool_call_with_prompt("c1", "echo_ro", json!({}), 200),
+            assistant_tool_call_with_prompt("c2", "echo_ro", json!({}), 200),
+            assistant_text("summary"),
+            assistant_text("done"),
+        ];
+        let http = MockHttp::new(queue);
+        let mock = http.clone();
+        let _ = collect(
+            http,
+            tools(vec![("echo_ro", true)]),
+            "hi",
+            RunOptions::default()
+                .permission_mode(PermissionMode::BypassPermissions)
+                .compaction(compaction_cfg()),
+        )
+        .await;
+
+        let seen = mock.seen_requests.lock().unwrap();
+        let post_compact = &seen[3];
+        let msgs = &post_compact.messages;
+        for (i, m) in msgs.iter().enumerate() {
+            if m.role == "assistant" {
+                if let Some(calls) = &m.tool_calls {
+                    for (offset, call) in calls.iter().enumerate() {
+                        let follower = msgs.get(i + 1 + offset).unwrap_or_else(|| {
+                            panic!("assistant tool_call at idx {i} has no follower")
+                        });
+                        assert_eq!(follower.role, "tool");
+                        assert_eq!(
+                            follower.tool_call_id.as_deref(),
+                            Some(call.id.as_str()),
+                            "tool_result id must match assistant's tool_call id"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn compaction_failure_falls_through() {
+        // Compactor returns a transport error. The main loop must log a
+        // warning and continue with the un-compacted history; the run
+        // still terminates successfully.
+        let queue: Vec<DResult<ChatResponse>> = vec![
+            Ok(assistant_tool_call_with_prompt(
+                "c1",
+                "echo_ro",
+                json!({}),
+                200,
+            )),
+            Ok(assistant_tool_call_with_prompt(
+                "c2",
+                "echo_ro",
+                json!({}),
+                200,
+            )),
+            Err(crate::error::DeepSeekError::Api {
+                status: 500,
+                body: "boom".into(),
+            }),
+            Ok(assistant_text("done")),
+        ];
+        let http = MockHttp::new_with_results(queue);
+        let mock = http.clone();
+        let msgs = collect(
+            http,
+            tools(vec![("echo_ro", true)]),
+            "hi",
+            RunOptions::default()
+                .permission_mode(PermissionMode::BypassPermissions)
+                .compaction(compaction_cfg()),
+        )
+        .await;
+
+        // No System{Compact} event was emitted.
+        assert!(
+            !msgs.iter().any(|m| matches!(
+                m,
+                SdkMessage::System {
+                    subtype: SystemSubtype::Compact,
+                    ..
+                }
+            )),
+            "compaction failure must not emit System::Compact"
+        );
+
+        // Run still terminated successfully on the un-compacted history.
+        let last = msgs.last().unwrap();
+        assert!(matches!(
+            last,
+            SdkMessage::Result {
+                subtype: ResultSubtype::Success,
+                ..
+            }
+        ));
+
+        // The post-failure main request retained the full message history
+        // (no rewrite happened): user + 2 asst + 2 tool = 5 messages.
+        let seen = mock.seen_requests.lock().unwrap();
+        let post_failure = &seen[3];
+        assert_eq!(
+            post_failure.messages.len(),
+            5,
+            "history must remain un-compacted after a compactor failure"
+        );
+    }
+
+    #[tokio::test]
+    async fn compaction_disabled_by_default() {
+        // Without RunOptions::compaction(...), even with high prompt_tokens
+        // and many turns, no extra compactor request is observed.
+        let queue = vec![
+            assistant_tool_call_with_prompt("c1", "echo_ro", json!({}), 200),
+            assistant_tool_call_with_prompt("c2", "echo_ro", json!({}), 200),
+            assistant_text("done"),
+        ];
+        let http = MockHttp::new(queue);
+        let mock = http.clone();
+        let msgs = collect(
+            http,
+            tools(vec![("echo_ro", true)]),
+            "hi",
+            RunOptions::default().permission_mode(PermissionMode::BypassPermissions),
+        )
+        .await;
+
+        // Exactly 3 requests — no compactor call sneaked in.
+        assert_eq!(mock.seen_requests.lock().unwrap().len(), 3);
+        assert!(!msgs.iter().any(|m| matches!(
+            m,
+            SdkMessage::System {
+                subtype: SystemSubtype::Compact,
+                ..
+            }
+        )));
     }
 }

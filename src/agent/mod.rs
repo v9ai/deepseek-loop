@@ -28,6 +28,6 @@ pub mod scheduler;
 pub use builder::{AgentBuilder, DeepSeekAgent};
 pub use loop_runner::run;
 pub use messages::{ContentBlock, ResultSubtype, SdkMessage, SystemSubtype};
-pub use options::RunOptions;
+pub use options::{CompactionConfig, RunOptions};
 pub use permissions::{PermissionDecision, PermissionMode, PreToolHook};
 pub use tool::{Tool, ToolDefinition};

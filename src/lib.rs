@@ -27,8 +27,9 @@ pub use wasm::WasmClient;
 
 #[cfg(feature = "agent")]
 pub use agent::{
-    run, AgentBuilder, ContentBlock, DeepSeekAgent, PermissionDecision, PermissionMode,
-    PreToolHook, ResultSubtype, RunOptions, SdkMessage, SystemSubtype, Tool, ToolDefinition,
+    run, AgentBuilder, CompactionConfig, ContentBlock, DeepSeekAgent, PermissionDecision,
+    PermissionMode, PreToolHook, ResultSubtype, RunOptions, SdkMessage, SystemSubtype, Tool,
+    ToolDefinition,
 };
 
 #[cfg(feature = "cache")]

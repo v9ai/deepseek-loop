@@ -32,12 +32,18 @@ pub enum ContentBlock {
     },
 }
 
-/// Subtype of a `System` message. Currently only `Init` is emitted; compaction
-/// boundaries are deferred.
+/// Subtype of a `System` message.
+///
+/// - `Init` is emitted once at session start, carrying the session id and
+///   the run configuration.
+/// - `Compact` is emitted after a successful history-compaction step (see
+///   [`crate::agent::CompactionConfig`]). Its `data` field carries
+///   `{"message_count_after": <usize>}`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SystemSubtype {
     Init,
+    Compact,
 }
 
 /// Final disposition of an agent run.

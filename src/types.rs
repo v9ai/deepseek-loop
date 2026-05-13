@@ -152,11 +152,22 @@ pub struct Choice {
     pub finish_reason: Option<String>,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct UsageInfo {
     pub prompt_tokens: u32,
     pub completion_tokens: u32,
     pub total_tokens: u32,
+    /// Prompt tokens served from DeepSeek's context cache. Charged at the
+    /// cache-hit input rate (typically ~25% of cache-miss). Returned by the
+    /// API in the `usage` object; absent for models/responses that don't
+    /// report cache stats.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_cache_hit_tokens: Option<u32>,
+    /// Prompt tokens that missed the context cache. Charged at the full input
+    /// rate. `prompt_cache_hit_tokens + prompt_cache_miss_tokens` should equal
+    /// `prompt_tokens` when both are reported.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_cache_miss_tokens: Option<u32>,
 }
 
 // ── Agent Result (parity with Anthropic AgentResult) ──────────────────────
