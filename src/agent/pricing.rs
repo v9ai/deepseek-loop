@@ -42,7 +42,10 @@ pub fn model_pricing(model: &str) -> Option<ModelPricing> {
 /// prompt at the miss rate. Returns `None` if pricing is unknown.
 pub fn turn_cost_usd(model: &str, usage: &UsageInfo) -> Option<f64> {
     let p = model_pricing(model)?;
-    let (hit, miss) = match (usage.prompt_cache_hit_tokens, usage.prompt_cache_miss_tokens) {
+    let (hit, miss) = match (
+        usage.prompt_cache_hit_tokens,
+        usage.prompt_cache_miss_tokens,
+    ) {
         (Some(h), Some(m)) => (h, m),
         (Some(h), None) => (h, usage.prompt_tokens.saturating_sub(h)),
         (None, Some(m)) => (usage.prompt_tokens.saturating_sub(m), m),
