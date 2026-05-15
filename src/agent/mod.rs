@@ -13,6 +13,7 @@
 
 pub mod builder;
 pub mod loop_runner;
+pub mod memory;
 pub mod messages;
 pub mod options;
 pub mod permissions;
@@ -27,7 +28,11 @@ pub mod scheduler;
 
 pub use builder::{AgentBuilder, DeepSeekAgent};
 pub use loop_runner::run;
+pub use memory::{ConversationMemory, Embedder, MemoryError, MemoryHit, MemoryRecord};
 pub use messages::{ContentBlock, ResultSubtype, SdkMessage, SystemSubtype};
 pub use options::{CompactionConfig, RunOptions};
 pub use permissions::{PermissionDecision, PermissionMode, PreToolHook};
 pub use tool::{Tool, ToolDefinition};
+
+#[cfg(feature = "memory")]
+pub use memory::lance::{FastEmbedEmbedder, LanceMemory};

@@ -27,10 +27,13 @@ pub use wasm::WasmClient;
 
 #[cfg(feature = "agent")]
 pub use agent::{
-    run, AgentBuilder, CompactionConfig, ContentBlock, DeepSeekAgent, PermissionDecision,
-    PermissionMode, PreToolHook, ResultSubtype, RunOptions, SdkMessage, SystemSubtype, Tool,
-    ToolDefinition,
+    run, AgentBuilder, CompactionConfig, ContentBlock, ConversationMemory, DeepSeekAgent, Embedder,
+    MemoryError, MemoryHit, MemoryRecord, PermissionDecision, PermissionMode, PreToolHook,
+    ResultSubtype, RunOptions, SdkMessage, SystemSubtype, Tool, ToolDefinition,
 };
+
+#[cfg(feature = "memory")]
+pub use agent::{FastEmbedEmbedder, LanceMemory};
 
 #[cfg(feature = "cache")]
 pub use cache::{Cache, InFlightDedup};

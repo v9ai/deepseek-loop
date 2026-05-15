@@ -170,6 +170,7 @@ impl RunOptions {
             session_id: self.session_id.clone(),
             base_url: self.base_url.clone(),
             compaction: self.compaction.clone(),
+            memory: self.memory.clone(),
         }
     }
 }

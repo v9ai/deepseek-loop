@@ -1,5 +1,40 @@
 # Changelog
 
+## 0.5.0 — 2026-05-15
+
+### Features
+
+- New opt-in **recall-aware compaction** behind the `memory` cargo feature.
+  When history compaction would discard the middle of a conversation, the
+  dropped turns are embedded locally and archived into a LanceDB vector
+  store instead of being lost. Enable with
+  `RunOptions::memory(Arc<dyn ConversationMemory>)` alongside
+  `RunOptions::compaction(..)`. Archival is best-effort and non-fatal: a
+  store error is logged and the compaction proceeds regardless.
+- New built-in **`MemorySearch`** tool (read-only) for explicit semantic
+  recall of archived turns. Wired via
+  `builtin_tools::default_tools_with_memory(store, session_id)` or
+  `MemorySearchTool::new(..)`. Available whenever `builtin-tools` is on —
+  it depends only on the `ConversationMemory` trait, not on LanceDB.
+- `LanceMemory` + `FastEmbedEmbedder` (gated by `memory`): a LanceDB-backed
+  `ConversationMemory` and a local `fastembed` (bge-small-en-v1.5, 384-dim)
+  `Embedder`. Native-only — never enabled by `default` or `wasm`.
+- New public API (always exported under the `agent` feature):
+  `ConversationMemory`, `Embedder`, `MemoryRecord`, `MemoryHit`,
+  `MemoryError`. `RunOptions` gains a `memory` field and `.memory(..)`
+  builder. **Adding a public field to `RunOptions`** — construct via
+  `RunOptions::new(..)` / `Default` + builders rather than a struct
+  literal.
+- CLI: new `--memory` flag (requires building with `--features memory`).
+  Pair with `--resume <session>` to recall across runs.
+
+### Fixes
+
+- CLI: the agent loop's `session_id` is now bound to the resolved CLI
+  session id. Previously `build_opts` never set it, so the loop
+  auto-generated a UUID that diverged from the scheduler's (and any
+  memory) session namespace.
+
 ## 0.4.0 — 2026-05-13
 
 ### Cost efficiency

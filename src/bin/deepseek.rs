@@ -103,6 +103,13 @@ struct Args {
     /// Cap on concurrent scheduled tasks (default 50).
     #[arg(long, default_value_t = DEFAULT_MAX_TASKS)]
     max_tasks: usize,
+
+    /// Enable recall-aware compaction: archive compacted-out turns into a
+    /// local LanceDB store and expose a `MemorySearch` tool. Pair with
+    /// `--resume <session>` to recall across runs. Requires building with
+    /// `--features memory`.
+    #[arg(long)]
+    memory: bool,
 }
 
 #[derive(Copy, Clone, Debug, ValueEnum)]
@@ -197,14 +204,42 @@ async fn main() -> anyhow::Result<()> {
     }
     let scheduler = Arc::new(Mutex::new(scheduler));
 
-    let opts = build_opts(&args);
+    let mut opts = build_opts(&args);
+    // Bind the loop's session id to the CLI's resolved id so the loop, the
+    // scheduler, and the memory store all share one namespace. (Previously
+    // unset, so the loop auto-generated an id divergent from the scheduler's.)
+    opts = opts.session_id(session_id.clone());
     let http = ReqwestClient::new();
 
-    let tools_arc: Arc<Vec<Box<dyn deepseek::Tool>>> = if scheduler.lock().unwrap().is_disabled() {
-        Arc::new(default_tools())
+    #[cfg_attr(not(feature = "memory"), allow(unused_mut))]
+    let mut tool_vec: Vec<Box<dyn deepseek::Tool>> = if scheduler.lock().unwrap().is_disabled() {
+        default_tools()
     } else {
-        Arc::new(default_tools_with_scheduler(scheduler.clone()))
+        default_tools_with_scheduler(scheduler.clone())
     };
+
+    if args.memory {
+        #[cfg(not(feature = "memory"))]
+        anyhow::bail!(
+            "--memory requires building with the `memory` feature \
+             (e.g. `cargo run --features \"cli memory\"`)"
+        );
+        #[cfg(feature = "memory")]
+        {
+            let mem = Arc::new(
+                deepseek::LanceMemory::open(None)
+                    .await
+                    .map_err(|e| anyhow::anyhow!("failed to open memory store: {e}"))?,
+            );
+            opts = opts.memory(mem.clone());
+            tool_vec.push(Box::new(
+                deepseek::agent::builtin_tools::MemorySearchTool::new(mem, session_id.clone()),
+            ));
+            eprintln!("memory: recall-aware compaction enabled (session={session_id})");
+        }
+    }
+
+    let tools_arc: Arc<Vec<Box<dyn deepseek::Tool>>> = Arc::new(tool_vec);
 
     // Fixed-interval loop: --loop-every implies --loop.
     if let Some(interval) = args.loop_every.as_deref() {
@@ -261,7 +296,15 @@ fn build_opts(args: &Args) -> RunOptions {
     if let Some(sp) = args.system_prompt.clone() {
         opts = opts.system_prompt(sp);
     } else {
-        opts = opts.system_prompt(default_system_prompt());
+        let mut sp = default_system_prompt();
+        if args.memory {
+            sp.push_str(
+                " A `MemorySearch` tool can recall earlier turns of this conversation \
+                 that were compacted out of context — use it to recover lost specifics \
+                 instead of redoing work.",
+            );
+        }
+        opts = opts.system_prompt(sp);
     }
     if let Some(b) = args.base_url.clone() {
         opts = opts.base_url(b);

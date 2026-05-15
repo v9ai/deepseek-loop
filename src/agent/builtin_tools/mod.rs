@@ -7,6 +7,7 @@ pub mod bash;
 pub mod edit;
 pub mod glob;
 pub mod grep;
+pub mod memory_search;
 pub mod read;
 pub mod write;
 
@@ -14,6 +15,7 @@ pub use bash::BashTool;
 pub use edit::EditTool;
 pub use glob::GlobTool;
 pub use grep::GrepTool;
+pub use memory_search::MemorySearchTool;
 pub use read::ReadTool;
 pub use write::WriteTool;
 
@@ -54,6 +56,30 @@ pub fn default_tools() -> Vec<Box<dyn Tool>> {
     #[cfg(feature = "scheduler")]
     v.push(Box::new(MonitorTool));
     v
+}
+
+/// The six stateless built-ins plus a [`MemorySearchTool`] bound to
+/// `memory` + `session_id`.
+///
+/// `session_id` MUST be the same value passed to
+/// [`crate::agent::RunOptions::session_id`] (and `RunOptions::memory` must be
+/// set to the same `memory` store) — otherwise archive and recall use
+/// different namespaces. See the invariant on
+/// [`crate::agent::RunOptions::memory`].
+pub fn default_tools_with_memory(
+    memory: std::sync::Arc<dyn crate::agent::memory::ConversationMemory>,
+    session_id: impl Into<String>,
+) -> Vec<Box<dyn Tool>> {
+    let session_id = session_id.into();
+    vec![
+        Box::new(ReadTool),
+        Box::new(WriteTool),
+        Box::new(EditTool),
+        Box::new(GlobTool),
+        Box::new(GrepTool),
+        Box::new(BashTool),
+        Box::new(MemorySearchTool::new(memory, session_id)),
+    ]
 }
 
 /// All ten built-in tools wired against the supplied scheduler. Available

@@ -25,6 +25,7 @@ use crate::types::{
     tool_result_msg, ChatContent, ChatMessage, ChatRequest, FunctionSchema, ToolSchema, UsageInfo,
 };
 
+use super::memory::MemoryRecord;
 use super::messages::{ContentBlock, ResultSubtype, SdkMessage, SystemSubtype};
 use super::options::{CompactionConfig, RunOptions};
 use super::permissions::{PermissionDecision, PermissionMode};
@@ -51,6 +52,13 @@ where
             .session_id
             .clone()
             .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+        if opts.memory.is_some() && opts.session_id.is_none() {
+            tracing::warn!(
+                "RunOptions::memory set without RunOptions::session_id; the loop \
+                 archives under an auto-generated id the MemorySearch tool does not \
+                 share — recall will return nothing"
+            );
+        }
         yield SdkMessage::System {
             subtype: SystemSubtype::Init,
             session_id: session_id.clone(),
@@ -380,7 +388,7 @@ where
                 // full-history retry on the next iteration.
                 if let Some(cfg) = opts.compaction.as_ref() {
                     if last_turn_prompt_tokens >= cfg.threshold_prompt_tokens {
-                        match compact_history(&http, &api_key, &opts, cfg, &mut messages).await {
+                        match compact_history(&http, &api_key, &opts, cfg, &session_id, &mut messages).await {
                             Ok(outcome) => {
                                 if let Some(u) = &outcome.usage {
                                     total_prompt_tokens =
@@ -483,6 +491,7 @@ async fn compact_history<H>(
     api_key: &str,
     opts: &RunOptions,
     cfg: &CompactionConfig,
+    session_id: &str,
     messages: &mut Vec<ChatMessage>,
 ) -> crate::error::Result<CompactionOutcome>
 where
@@ -616,12 +625,79 @@ where
         tool_call_id: None,
         name: None,
     };
+    // Recall-aware compaction: archive the turns we are about to discard
+    // before they're gone. Best-effort — a failure is logged and the splice
+    // proceeds regardless, matching the non-fatal contract for compaction.
+    if let Some(mem) = opts.memory.as_ref() {
+        let records = archive_records(&messages[head_end..tail_start]);
+        if !records.is_empty() {
+            if let Err(e) = mem.archive(session_id, records).await {
+                tracing::warn!(
+                    error = %e,
+                    "memory archive failed; discarding compacted turns anyway"
+                );
+            }
+        }
+    }
+
     messages.splice(head_end..tail_start, std::iter::once(replacement));
 
     Ok(CompactionOutcome {
         usage,
         rewrote: true,
     })
+}
+
+/// Render the soon-to-be-discarded slice into one [`MemoryRecord`] per
+/// message. `text` is byte-bounded with [`truncate_for_transcript`] (a
+/// looser 2000-byte cap than the LLM transcript, since recall benefits from
+/// more content). Empty rows are skipped.
+fn archive_records(slice: &[ChatMessage]) -> Vec<MemoryRecord> {
+    let created_at = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs().to_string())
+        .unwrap_or_default();
+
+    let mut out = Vec::new();
+    for msg in slice {
+        let content_text = msg.content.as_str();
+        let mut tool_name = String::new();
+        let text = match msg.role.as_str() {
+            "assistant" => {
+                let mut t = String::new();
+                if !content_text.trim().is_empty() {
+                    t.push_str(&truncate_for_transcript(content_text.trim(), 2000));
+                }
+                if let Some(calls) = &msg.tool_calls {
+                    for c in calls {
+                        if tool_name.is_empty() {
+                            tool_name = c.function.name.clone();
+                        }
+                        if !t.is_empty() {
+                            t.push('\n');
+                        }
+                        t.push_str(&format!(
+                            "[tool_call name={} args={}]",
+                            c.function.name,
+                            truncate_for_transcript(&c.function.arguments, 400)
+                        ));
+                    }
+                }
+                t
+            }
+            _ => truncate_for_transcript(content_text, 2000),
+        };
+        if text.trim().is_empty() {
+            continue;
+        }
+        out.push(MemoryRecord {
+            role: msg.role.clone(),
+            tool_name,
+            text,
+            created_at: created_at.clone(),
+        });
+    }
+    out
 }
 
 fn usage_info(
@@ -654,6 +730,7 @@ mod tests {
     use futures::StreamExt;
     use serde_json::json;
 
+    use crate::agent::memory::InMemoryMemory;
     use crate::agent::permissions::PermissionMode;
     use crate::agent::tool::ToolDefinition;
     use crate::client::HttpClient;
@@ -1207,5 +1284,92 @@ mod tests {
                 ..
             }
         )));
+    }
+
+    #[tokio::test]
+    async fn compaction_archives_discarded_turns_to_memory() {
+        // Same shape as the trigger test. With memory configured, the slice
+        // the compactor drops ([asst1(tool_call), tool1]) must land in the
+        // store under the run's session id before it is spliced out.
+        let queue = vec![
+            assistant_tool_call_with_prompt("c1", "echo_ro", json!({}), 200),
+            assistant_tool_call_with_prompt("c2", "echo_ro", json!({}), 200),
+            assistant_text("summary of earlier turns"),
+            assistant_text("done"),
+        ];
+        let mem = Arc::new(InMemoryMemory::new());
+        let msgs = collect(
+            MockHttp::new(queue),
+            tools(vec![("echo_ro", true)]),
+            "hi",
+            RunOptions::default()
+                .permission_mode(PermissionMode::BypassPermissions)
+                .compaction(compaction_cfg())
+                .session_id("t1")
+                .memory(mem.clone()),
+        )
+        .await;
+
+        assert!(msgs.iter().any(|m| matches!(
+            m,
+            SdkMessage::System {
+                subtype: SystemSubtype::Compact,
+                ..
+            }
+        )));
+
+        let archived = mem.archived_for("t1");
+        assert_eq!(archived.len(), 2, "archived={archived:?}");
+        assert_eq!(archived[0].role, "assistant");
+        assert_eq!(archived[0].tool_name, "echo_ro");
+        assert!(archived[0].text.contains("[tool_call name=echo_ro"));
+        assert_eq!(archived[1].role, "tool");
+        assert!(archived[1].text.contains("echoed"));
+        // Nothing archived under an unrelated session id.
+        assert!(mem.archived_for("other").is_empty());
+    }
+
+    #[tokio::test]
+    async fn archive_failure_is_non_fatal() {
+        // The store's archive() always errors. Compaction must still rewrite
+        // history (System{Compact} emitted) and the run must still succeed —
+        // the splice proceeds regardless of archival outcome.
+        let queue = vec![
+            assistant_tool_call_with_prompt("c1", "echo_ro", json!({}), 200),
+            assistant_tool_call_with_prompt("c2", "echo_ro", json!({}), 200),
+            assistant_text("summary"),
+            assistant_text("done"),
+        ];
+        let mem = Arc::new(InMemoryMemory::failing());
+        let msgs = collect(
+            MockHttp::new(queue),
+            tools(vec![("echo_ro", true)]),
+            "hi",
+            RunOptions::default()
+                .permission_mode(PermissionMode::BypassPermissions)
+                .compaction(compaction_cfg())
+                .session_id("t1")
+                .memory(mem.clone()),
+        )
+        .await;
+
+        assert!(
+            msgs.iter().any(|m| matches!(
+                m,
+                SdkMessage::System {
+                    subtype: SystemSubtype::Compact,
+                    ..
+                }
+            )),
+            "archive failure must NOT suppress the compaction rewrite"
+        );
+        assert!(matches!(
+            msgs.last().unwrap(),
+            SdkMessage::Result {
+                subtype: ResultSubtype::Success,
+                ..
+            }
+        ));
+        assert!(mem.archived_for("t1").is_empty());
     }
 }

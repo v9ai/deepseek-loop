@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 use crate::types::EffortLevel;
 
+use super::memory::ConversationMemory;
 use super::permissions::{PermissionMode, PreToolHook};
 
 /// Configuration for natural-language history compaction.
@@ -81,6 +82,20 @@ pub struct RunOptions {
     /// Opt-in history compaction. `None` (default) disables compaction —
     /// the full conversation is resent every turn. See [`CompactionConfig`].
     pub compaction: Option<CompactionConfig>,
+    /// Opt-in recall-aware compaction. When set, the turns the compactor
+    /// would otherwise discard are archived into this store just before they
+    /// are dropped, and a `MemorySearch` tool can recall them later.
+    /// Has no effect unless [`compaction`](Self::compaction) is also set.
+    ///
+    /// # Session-id invariant
+    ///
+    /// The loop archives under the run's resolved `session_id`. You MUST set
+    /// [`RunOptions::session_id`] to a stable value and pass that *same*
+    /// value to
+    /// [`default_tools_with_memory`](crate::agent::builtin_tools::default_tools_with_memory)
+    /// (or to `MemorySearchTool::new`); otherwise archive and recall use
+    /// different namespaces and recall returns nothing.
+    pub memory: Option<Arc<dyn ConversationMemory>>,
 }
 
 impl Default for RunOptions {
@@ -98,6 +113,7 @@ impl Default for RunOptions {
             session_id: None,
             base_url: "https://api.deepseek.com/v1".into(),
             compaction: None,
+            memory: None,
         }
     }
 }
@@ -171,6 +187,14 @@ impl RunOptions {
     /// Enable natural-language history compaction with the given config.
     pub fn compaction(mut self, cfg: CompactionConfig) -> Self {
         self.compaction = Some(cfg);
+        self
+    }
+
+    /// Enable recall-aware compaction: archive compacted-out turns into
+    /// `store`. Only effective when [`compaction`](Self::compaction) is also
+    /// set. See the session-id invariant on [`RunOptions::memory`].
+    pub fn memory(mut self, store: Arc<dyn ConversationMemory>) -> Self {
+        self.memory = Some(store);
         self
     }
 }
