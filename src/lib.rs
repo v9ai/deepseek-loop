@@ -20,7 +20,10 @@ pub use error::{DeepSeekError, Result};
 pub use types::*;
 
 #[cfg(feature = "reqwest-client")]
-pub use reqwest_client::{client_from_env, reason, reason_with_retry, ReqwestClient};
+pub use reqwest_client::{
+    client_from_env, reason, reason_with_retry, reason_with_tokens, reason_with_tokens_at,
+    ReqwestClient,
+};
 
 #[cfg(feature = "wasm")]
 pub use wasm::WasmClient;

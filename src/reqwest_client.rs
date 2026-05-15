@@ -126,6 +126,65 @@ fn is_retryable(err: &anyhow::Error) -> bool {
     msg.contains("HTTP error:") || msg.contains("connection") || msg.contains("timed out")
 }
 
+/// Like [`reason`] but with caller-specified `max_tokens` and `temperature`.
+/// The primary escape hatch for long-document rewrites that need both a higher
+/// token ceiling AND controlled randomness to explore different outputs.
+pub async fn reason_with_tokens_at(
+    client: &DeepSeekClient<ReqwestClient>,
+    system: &str,
+    user: &str,
+    max_tokens: u32,
+    temperature: f64,
+) -> Result<ReasonerOutput> {
+    debug!(
+        "deepseek-reasoner call (max_tokens={max_tokens} temperature={temperature:.2}): system={:.80}…",
+        system
+    );
+
+    let request = ChatRequest {
+        model: REASONER_MODEL.to_string(),
+        messages: vec![
+            crate::types::system_msg(system),
+            crate::types::user_msg(user),
+        ],
+        tools: None,
+        tool_choice: None,
+        temperature: Some(temperature),
+        max_tokens: Some(max_tokens),
+        stream: Some(false),
+        reasoning_effort: Some("high".to_string()),
+        thinking: Some(serde_json::json!({"type": "enabled"})),
+    };
+
+    let resp = client
+        .chat(&request)
+        .await
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+
+    let choice = resp
+        .choices
+        .into_iter()
+        .next()
+        .context("No choices in DeepSeek response")?;
+
+    Ok(ReasonerOutput {
+        reasoning: choice.message.reasoning_content.unwrap_or_default(),
+        content: choice.message.content.as_str().to_string(),
+    })
+}
+
+/// Like [`reason`] but with a caller-specified `max_tokens` cap (temperature fixed at 0.6).
+/// Use when the output must be longer than the default 8 192-token ceiling
+/// (e.g. rewriting a full paper that already exceeds ~30 k chars).
+pub async fn reason_with_tokens(
+    client: &DeepSeekClient<ReqwestClient>,
+    system: &str,
+    user: &str,
+    max_tokens: u32,
+) -> Result<ReasonerOutput> {
+    reason_with_tokens_at(client, system, user, max_tokens, 0.6).await
+}
+
 /// Wrapper around [`reason`] with exponential backoff: 3 attempts, 1s → 2s → 4s.
 /// Only retries on 5xx / network errors, not 4xx.
 pub async fn reason_with_retry(
